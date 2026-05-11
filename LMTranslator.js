@@ -1,10 +1,10 @@
 //=============================================================================
-// LMTranslator.js  v3.13.7
+// LMTranslator.js  v3.14.7
 // 메시지 창 단위 번역 + 밀림현상 방지 + 캐시 + 다음 메시지 프리패치 + 동시 번역
 //=============================================================================
 /*:
  * @target MZ
- * @plugindesc v3.13.7 | 콘솔 로그 최소화 + 번역 상태 저장
+ * @plugindesc v3.14.7 | Comment/메뉴/아이템/스킬 번역 추가
  * @author Claude (Anthropic)
  *
  * @help
@@ -102,6 +102,15 @@
  * @default 1
  * @parent grp_api
  *
+ * @param requestCooldownMs
+ * @text 번역 요청 간격(ms)
+ * @desc API 요청 1개가 끝난 뒤 다음 번역 요청을 시작하기 전 쉬는 시간. 렉이 있으면 300~1000 권장.
+ * @type number
+ * @min 0
+ * @max 10000
+ * @default 250
+ * @parent grp_api
+ *
  * @param prefetchLookahead
  * @text 다음 대사 선번역 개수
  * @desc 현재 메시지창이 떠 있는 동안 미리 번역할 다음 메시지 블록 수. 0이면 현재 이벤트의 남은 대사를 모두 시도합니다.
@@ -113,9 +122,9 @@
  *
  * @param autoPretranslateJson
  * @text JSON 자동 선번역
- * @desc 현재 플레이 중인 맵 JSON을 먼저 번역하고, 끝나면 data/*.json 전체를 캐시에 자동 번역합니다.
+ * @desc 게임 플레이 중 백그라운드 JSON 선번역을 자동 실행합니다. 렉이 있으면 OFF 권장. 플러그인 커맨드로 수동 실행 가능.
  * @type boolean
- * @default true
+ * @default false
  * @parent grp_api
  *
  * @param jsonPretranslateDelay
@@ -160,7 +169,14 @@
  * @param characters
  * @text 캐릭터 설정
  * @type struct<Character>[]
- * @default []
+ * @default ["{\"name\":\"아리사\",\"personality\":\"\\\"밝고 장난기가 있지만 중요한 순간에는 진지한 소녀. 말투는 친근하고 감정 표현이 풍부함.\\\"\",\"customPrompt\":\"\\\"Translate {charName}'s dialogue into natural {targetLang}. Personality: {personality}. Output only the translation. Preserve RPG Maker control codes.\\\"\"}"]
+ * @parent grp_prompt
+ *
+ * @param nameGlossary
+ * @text 이름/용어 고정표
+ * @desc 한 줄에 원문=번역 형식으로 입력. 예: 夏美=나츠미. 이름 오역 방지에 사용됩니다.
+ * @type note
+ * @default "夏美=나츠미\n奈津美=나츠미\nナツミ=나츠미\nNatsumi=나츠미"
  * @parent grp_prompt
  *
  * @param grp_overflow
@@ -234,6 +250,29 @@
  * @default true
  * @parent grp_misc
  *
+ * @param translateComments
+ * @text Comment/ActiveMessage 번역
+ * @desc 이벤트 Comment(108/408), 특히 <ActiveMessage: ...> 안쪽 문장을 실행 전 번역합니다.
+ * @type boolean
+ * @default true
+ * @parent grp_misc
+ *
+ * @param translateDatabaseText
+ * @text 메뉴/DB 텍스트 번역
+ * @desc 메뉴 용어, 아이템, 스킬, 장비, 상태 등 데이터베이스 텍스트를 캐시 기반으로 번역합니다.
+ * @type boolean
+ * @default true
+ * @parent grp_misc
+ *
+ * @param databaseTranslateDelay
+ * @text 메뉴/DB 번역 시작 지연(ms)
+ * @desc 데이터베이스 로드 후 메뉴/아이템/스킬 번역을 시작하기 전 대기 시간입니다.
+ * @type number
+ * @min 0
+ * @max 60000
+ * @default 1000
+ * @parent grp_misc
+ *
  * @param debugMode
  * @text 디버그 모드
  * @type boolean
@@ -244,6 +283,21 @@
  * @text 번역 캐시 파일 경로
  * @desc 번역 결과를 저장할 JSON 파일 경로 (게임 폴더 기준 상대경로)
  * @default data/LMTranslatorCache.json
+ * @parent grp_misc
+ *
+ * @param workCacheFile
+ * @text 작업용 번역 파일 경로
+ * @desc 번역 중간 결과를 모아두는 작업용 JSON 파일입니다.
+ * @default data/LMTranslatorExample.json
+ * @parent grp_misc
+ *
+ * @param cacheFlushIntervalMs
+ * @text 캐시 반영 주기(ms)
+ * @desc 작업용 번역 파일과 실제 캐시 파일을 디스크에 저장하는 주기입니다.
+ * @type number
+ * @min 1000
+ * @max 300000
+ * @default 30000
  * @parent grp_misc
  *
  * @param autoSaveCache
@@ -317,8 +371,9 @@
         maxTokens:     numberParam(raw.maxTokens     !== undefined ? raw.maxTokens     : 512, 512, 64, 4096),
         timeoutMs:     numberParam(raw.timeoutMs     !== undefined ? raw.timeoutMs     : 15000, 15000, 1000, 60000),
         concurrency:   numberParam(raw.concurrentLimit || 1, 1, 1, 10),
+        requestCooldownMs: numberParam(raw.requestCooldownMs !== undefined ? raw.requestCooldownMs : 250, 250, 0, 10000),
         prefetchLookahead: numberParam(raw.prefetchLookahead || 8, 8, 0, 50),
-        autoJson:      raw.autoPretranslateJson !== "false",
+        autoJson:      raw.autoPretranslateJson === "true",
         jsonDelay:     numberParam(raw.jsonPretranslateDelay !== undefined ? raw.jsonPretranslateDelay : 3000, 3000, 0, 60000),
         sourceLang:    String(raw.sourceLang    || "Japanese"),
         targetLang:    String(raw.targetLang    || "Korean"),
@@ -359,9 +414,18 @@
         enabled:       raw.enabledByDefault     !== "false",
         fallback:      raw.fallbackToOriginal   !== "false",
         preBeforeShow: raw.pretranslateBeforeDisplay !== "false",
+        translateComments: raw.translateComments !== "false",
+        translateDatabaseText: raw.translateDatabaseText !== "false",
+        databaseTranslateDelay: numberParam(raw.databaseTranslateDelay !== undefined ? raw.databaseTranslateDelay : 1000, 1000, 0, 60000),
         debug:         raw.debugMode            === "true",
         cacheFile:     String(raw.cacheFile     || "data/LMTranslatorCache.json"),
+        workCacheFile: String(raw.workCacheFile || "data/LMTranslatorExample.json"),
+        cacheFlushInterval: numberParam(raw.cacheFlushIntervalMs !== undefined ? raw.cacheFlushIntervalMs : 30000, 30000, 1000, 300000),
         autoSave:      raw.autoSaveCache        !== "false",
+        nameGlossaryRaw: (function() {
+            try { return JSON.parse(raw.nameGlossary || "\"\""); } catch(e) { return String(raw.nameGlossary || ""); }
+        })() || "夏美=나츠미\n奈津美=나츠미\nナツミ=나츠미\nNatsumi=나츠미",
+        glossary:      [],
         characters:    []
     };
 
@@ -376,6 +440,23 @@
     } catch (e) {
         console.warn(`[${PLUGIN_NAME}] 캐릭터 파싱 오류:`, e);
     }
+
+    function parseNameGlossary(rawText) {
+        return String(rawText || "")
+            .split(/\r?\n/)
+            .map(function(line) { return line.trim(); })
+            .filter(function(line) { return line && line.indexOf("=") > 0; })
+            .map(function(line) {
+                var pos = line.indexOf("=");
+                return {
+                    source: line.slice(0, pos).trim(),
+                    target: line.slice(pos + 1).trim()
+                };
+            })
+            .filter(function(item) { return item.source && item.target; });
+    }
+
+    Cfg.glossary = parseNameGlossary(Cfg.nameGlossaryRaw);
 
     //=========================================================================
     // 런타임 상태
@@ -403,7 +484,11 @@
         jsonController: null,
         apiActive: 0,
         apiQueue: [],
+        apiPumpTimer: null,
         nextPriorityRunning: false,
+        cacheDirty: false,
+        cacheFlushTimer: null,
+        databaseTranslateStarted: false,
     };
 
     //=========================================================================
@@ -411,6 +496,105 @@
     //=========================================================================
     const log = (...a) => { if (Cfg.debug) console.log(`[${PLUGIN_NAME}]`, ...a); };
     const info = (...a) => { if (Cfg.debug) console.info(`[${PLUGIN_NAME}]`, ...a); };
+
+    function isKoreanTarget() {
+        return /korean|한국|kor|ko/i.test(Cfg.targetLang || "");
+    }
+
+    function stripControlCodesForLanguage(text) {
+        return String(text || "")
+            .replace(/\\[A-Za-z]\[\d+\]/g, "")
+            .replace(/\\[!.<>^|\\{}]/g, "")
+            .replace(/\s+/g, "");
+    }
+
+    function hasHangul(text) {
+        return /[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7AF]/.test(text || "");
+    }
+
+    function hasKana(text) {
+        return /[\u3040-\u30FF\u31F0-\u31FF]/.test(text || "");
+    }
+
+    function hasCjkIdeograph(text) {
+        return /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/.test(text || "");
+    }
+
+    function hasTranslatableLetters(text) {
+        var plain = stripControlCodesForLanguage(text);
+        return /[\u3040-\u30FF\u31F0-\u31FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/.test(plain);
+    }
+
+    function escapeRegExp(text) {
+        return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+
+    function isPunctuationOnly(text) {
+        var plain = stripControlCodesForLanguage(text);
+        return !/[A-Za-z\u3040-\u30FF\u31F0-\u31FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u1100-\u11FF\u3130-\u318F\uAC00-\uD7AF]/.test(plain);
+    }
+
+    function isWrongTargetLanguage(output, sourceText) {
+        if (!isKoreanTarget()) return false;
+        var out = stripControlCodesForLanguage(output);
+        if (!out || isPunctuationOnly(out)) return false;
+
+        // 한국어 대상인데 일본어 가나가 섞이면 거의 항상 모델이 언어를 놓친 것이다.
+        if (hasKana(out)) return true;
+
+        // 중국어/일본어 한자만 있고 한글이 없으면 한국어 번역으로 보지 않는다.
+        if (hasCjkIdeograph(out) && !hasHangul(out)) return true;
+
+        // 원문이 번역 가능한 문자였는데 결과에 한글이 전혀 없으면 한국어 고정 실패로 간주한다.
+        if (hasTranslatableLetters(sourceText) && !hasHangul(out)) return true;
+
+        return false;
+    }
+
+    function glossaryPromptSection() {
+        if (!Cfg.glossary || Cfg.glossary.length === 0) return "";
+        var lines = Cfg.glossary.map(function(item) {
+            return "- " + item.source + " => " + item.target;
+        });
+        return [
+            "",
+            "[NAME / TERM GLOSSARY]",
+            "- Use these Korean spellings exactly when the source contains the matching name or term.",
+            "- Do not invent alternate readings for names.",
+        ].concat(lines).join("\n");
+    }
+
+    function sourceContainsGlossaryTerm(sourceText, item) {
+        return String(sourceText || "").indexOf(item.source) >= 0;
+    }
+
+    function applyGlossaryFixes(output, sourceText) {
+        if (!output || !Cfg.glossary || Cfg.glossary.length === 0) return output;
+        var fixed = String(output);
+
+        Cfg.glossary.forEach(function(item) {
+            if (!sourceContainsGlossaryTerm(sourceText, item)) return;
+
+            // 모델이 원문 표기를 그대로 남겼다면 지정한 한국어 표기로 교체한다.
+            fixed = fixed.replace(new RegExp(escapeRegExp(item.source), "g"), item.target);
+
+            // 자주 나오는 나츠미 오독을 보정한다. 더 필요한 이름은 이름/용어 고정표에 추가하면 된다.
+            if (item.target === "나츠미") {
+                fixed = fixed.replace(/나테미/g, item.target);
+                fixed = fixed.replace(/나쯔미/g, item.target);
+                fixed = fixed.replace(/나츠메/g, item.target);
+                fixed = fixed.replace(/나쓰미/g, item.target);
+            }
+        });
+
+        return fixed;
+    }
+
+    function sourceTextFromCacheKey(key) {
+        var text = String(key || "");
+        var pos = text.indexOf("||");
+        return pos >= 0 ? text.slice(pos + 2) : "";
+    }
 
     //=========================================================================
     // JSON 파일 캐시 레이어
@@ -433,15 +617,43 @@
         return _path.join(process.cwd(), Cfg.cacheFile);
     }
 
+    function _getWorkCacheFilePath() {
+        if (!_path) return null;
+        return _path.join(process.cwd(), Cfg.workCacheFile);
+    }
+
     function _getDataDirPath() {
         if (!_path) return null;
         return _path.join(process.cwd(), "data");
     }
 
+    function ensureJsonFileExists(filePath) {
+        if (!_fs || !_path || !filePath) return;
+        try {
+            var dir = _path.dirname(filePath);
+            if (!_fs.existsSync(dir)) {
+                _fs.mkdirSync(dir, { recursive: true });
+            }
+            if (!_fs.existsSync(filePath)) {
+                _fs.writeFileSync(filePath, "{}", "utf8");
+                info("JSON 파일 생성: " + filePath);
+            }
+        } catch (e) {
+            console.warn("[" + PLUGIN_NAME + "] JSON 파일 생성 실패 (" + filePath + "):", e.message);
+        }
+    }
+
+    function ensureCacheFilesExist() {
+        ensureJsonFileExists(_getWorkCacheFilePath());
+        ensureJsonFileExists(_getCacheFilePath());
+    }
+
     /** JSON 파일에서 캐시 불러오기 (게임 시작 시 1회) */
     function loadCacheFromFile() {
         if (!_fs) return;
-        var filePath = _getCacheFilePath();
+        ensureCacheFilesExist();
+        var filePath = _getWorkCacheFilePath();
+        if (!_fs.existsSync(filePath)) filePath = _getCacheFilePath();
         try {
             if (_fs.existsSync(filePath)) {
                 var fileRaw = _fs.readFileSync(filePath, "utf8");
@@ -450,18 +662,42 @@
                 Object.keys(obj).forEach(function(k) {
                     var entry = obj[k];
                     if (entry && typeof entry === "object" && entry.hasOwnProperty("translated")) {
+                        var entrySourceText = entry.sourceText || sourceTextFromCacheKey(k);
+                        if (entry.translated === true && isWrongTargetLanguage(entry.text || "", entrySourceText)) {
+                            count++;
+                            return;
+                        }
+                        if (entry.translated === true && entry.text) {
+                            var fixedText = applyGlossaryFixes(entry.text, entrySourceText);
+                            if (fixedText !== entry.text) {
+                                entry = {
+                                    translated: true,
+                                    text: fixedText,
+                                    sourceText: entrySourceText,
+                                    updatedAt: Date.now()
+                                };
+                                State.cacheDirty = true;
+                            }
+                        }
                         State.cacheMeta.set(k, entry);
                         State.attempted.add(k);
                         if (entry.translated === true && entry.text) {
                             State.cache.set(k, entry.text);
                         }
                     } else {
-                        State.cache.set(k, entry);
+                        var oldSourceText = sourceTextFromCacheKey(k);
+                        if (isWrongTargetLanguage(entry, oldSourceText)) {
+                            count++;
+                            return;
+                        }
+                        var oldFixedText = applyGlossaryFixes(entry, oldSourceText);
+                        if (oldFixedText !== entry) State.cacheDirty = true;
+                        State.cache.set(k, oldFixedText);
                         State.cacheMeta.set(k, {
                             translated: true,
-                            text: entry,
-                            sourceText: "",
-                            updatedAt: 0
+                            text: oldFixedText,
+                            sourceText: oldSourceText,
+                            updatedAt: oldFixedText !== entry ? Date.now() : 0
                         });
                         State.attempted.add(k);
                     }
@@ -477,9 +713,8 @@
     }
 
     /** 현재 State.cache 전체를 JSON 파일에 저장 */
-    function saveCacheToFile() {
-        if (!_fs || !Cfg.autoSave) return;
-        var filePath = _getCacheFilePath();
+    function writeCacheFileNow(filePath) {
+        if (!_fs || !Cfg.autoSave || !filePath) return;
         try {
             // data 디렉토리가 없으면 생성
             var dir = _path.dirname(filePath);
@@ -495,6 +730,27 @@
         }
     }
 
+    function flushCacheToFile() {
+        if (!State.cacheDirty) return;
+        writeCacheFileNow(_getWorkCacheFilePath());
+        writeCacheFileNow(_getCacheFilePath());
+        State.cacheDirty = false;
+    }
+
+    function scheduleCacheFlush() {
+        if (!_fs || !Cfg.autoSave) return;
+        State.cacheDirty = true;
+        if (State.cacheFlushTimer) return;
+        State.cacheFlushTimer = setTimeout(function() {
+            State.cacheFlushTimer = null;
+            flushCacheToFile();
+        }, Cfg.cacheFlushInterval);
+    }
+
+    function saveCacheToFile() {
+        scheduleCacheFlush();
+    }
+
     // 게임 시작 시 파일 캐시 로드
     loadCacheFromFile();
 
@@ -507,7 +763,19 @@
     }
 
     /** 캐릭터 + 상황에 맞는 시스템 프롬프트 생성 */
-    function buildSysPrompt(charName, maxLines) {
+    function targetLanguageLockPrompt() {
+        if (!isKoreanTarget()) return "";
+        return [
+            "",
+            "[TARGET LANGUAGE LOCK]",
+            "- The final answer MUST be Korean only.",
+            "- Do not output Chinese characters, Japanese kana, or the original source text.",
+            "- If the source contains Chinese or Japanese, fully translate it into natural Korean Hangul.",
+            "- Proper names and RPG Maker control codes may be preserved, but dialogue text must be Korean."
+        ].join("\n") + glossaryPromptSection();
+    }
+
+    function buildSysPrompt(charName, maxLines, retryHint) {
         const ch   = findChar(charName);
         const vars = {
             sourceLang:  Cfg.sourceLang,
@@ -517,13 +785,15 @@
             maxLines:    String(maxLines)
         };
         // 캐릭터 커스텀 프롬프트 우선
-        if (ch && ch.custom && ch.custom.trim()) return fill(ch.custom, vars);
+        if (ch && ch.custom && ch.custom.trim()) {
+            return fill(ch.custom, vars) + targetLanguageLockPrompt() + (retryHint || "");
+        }
         // 기본 프롬프트 + 성향 추가
         let p = fill(Cfg.sysPrompt, vars);
         if (ch && ch.persona && Cfg.charAppend) {
             p += "\n" + fill(Cfg.charAppend, vars);
         }
-        return p;
+        return p + targetLanguageLockPrompt() + (retryHint || "");
     }
 
     //=========================================================================
@@ -671,7 +941,20 @@
     //=========================================================================
     // LM Studio API 호출
     //=========================================================================
+    function scheduleApiPump(delay) {
+        if (delay === 0 && State.apiPumpTimer) {
+            clearTimeout(State.apiPumpTimer);
+            State.apiPumpTimer = null;
+        }
+        if (State.apiPumpTimer) return;
+        State.apiPumpTimer = setTimeout(function() {
+            State.apiPumpTimer = null;
+            pumpApiQueue();
+        }, Math.max(0, delay || 0));
+    }
+
     function pumpApiQueue() {
+        if (State.apiPumpTimer) return;
         var limit = Math.max(1, Cfg.concurrency);
         while (State.apiActive < limit && State.apiQueue.length > 0) {
             let job = State.apiQueue.shift();
@@ -687,7 +970,8 @@
                 job.resolve(null);
             }).then(function() {
                 State.apiActive = Math.max(0, State.apiActive - 1);
-                pumpApiQueue();
+                var hasPriority = State.apiQueue.some(function(q) { return q.priority; });
+                scheduleApiPump(hasPriority ? 0 : Cfg.requestCooldownMs);
             });
         }
     }
@@ -714,6 +998,7 @@
                 text: text,
                 charName: charName,
                 signal: signal || null,
+                priority: !!priority,
                 resolve: resolve
             };
 
@@ -723,8 +1008,44 @@
                 State.apiQueue.push(job);
             }
 
-            pumpApiQueue();
+            scheduleApiPump(priority ? 0 : Cfg.requestCooldownMs);
         });
+    }
+
+    function cleanModelOutput(content) {
+        if (!content) return null;
+        var out = String(content).trim();
+        if (!out) return null;
+
+        // 모델이 프롬프트 템플릿을 따라 출력한 경우 번역 라벨 뒤만 사용한다.
+        var labelRe = /(?:\*\*)?\s*(?:Korean\s+Translation|Translation|번역문|한국어\s*번역)\s*:?\s*(?:\*\*)?/ig;
+        var match;
+        var lastEnd = -1;
+        while ((match = labelRe.exec(out)) !== null) lastEnd = labelRe.lastIndex;
+        if (lastEnd >= 0) {
+            out = out.slice(lastEnd).trim();
+        }
+
+        // 남은 내용에 프롬프트 섹션이 그대로 있으면 출력하지 않는다.
+        var leakPatterns = [
+            /\[CONTENT POLICY\]/i,
+            /\[TRANSLATION RULES\]/i,
+            /\*\*Original Text:\*\*/i,
+            /Original Text\s*:/i,
+            /Output ONLY/i,
+            /Preserve all RPG Maker control codes/i,
+            /If translation is truly impossible/i
+        ];
+        for (var i = 0; i < leakPatterns.length; i++) {
+            if (leakPatterns[i].test(out)) {
+                log("프롬프트 유출 감지 - 응답 폐기");
+                return null;
+            }
+        }
+
+        out = out.replace(/^```(?:\w+)?\s*/i, "").replace(/\s*```$/i, "").trim();
+        out = out.replace(/^["“”']+|["“”']+$/g, "").trim();
+        return out || null;
     }
 
     async function callAPIRaw(text, charName, signal) {
@@ -745,26 +1066,46 @@
         }
     
         try {
-            var res = await fetch(Cfg.apiUrl, {
-                method:  "POST",
-                headers: { "Content-Type": "application/json" },
-                signal:  timeoutController ? timeoutController.signal : undefined,
-                body:    JSON.stringify({
-                    model:       Cfg.modelName,
-                    temperature: Cfg.temperature,
-                    max_tokens:  Cfg.maxTokens,
-                    messages: [
-                        { role: "system", content: buildSysPrompt(charName, Cfg.maxLines) },
-                        { role: "user",   content: text }
-                    ]
-                })
-            });
-    
-            if (!res.ok) throw new Error("HTTP " + res.status);
-            var data = await res.json();
-            var content = data && data.choices && data.choices[0] &&
-                          data.choices[0].message && data.choices[0].message.content;
-            return content ? content.trim() : null;
+            var maxAttempts = isKoreanTarget() ? 2 : 1;
+            for (var attempt = 0; attempt < maxAttempts; attempt++) {
+                if (signal && signal.aborted) return null;
+
+                var retryHint = attempt > 0
+                    ? "\n\n[RETRY FIX]\nYour previous answer was not Korean. Translate again into Korean Hangul only. Return only the Korean translation."
+                    : "";
+                var userText = isKoreanTarget()
+                    ? "Translate the following " + Cfg.sourceLang + " text into Korean only. Return only Korean translation.\n\n" + text
+                    : text;
+
+                var res = await fetch(Cfg.apiUrl, {
+                    method:  "POST",
+                    headers: { "Content-Type": "application/json" },
+                    signal:  timeoutController ? timeoutController.signal : undefined,
+                    body:    JSON.stringify({
+                        model:       Cfg.modelName,
+                        temperature: Math.min(Cfg.temperature, attempt > 0 ? 0.1 : Cfg.temperature),
+                        max_tokens:  Cfg.maxTokens,
+                        messages: [
+                            { role: "system", content: buildSysPrompt(charName, Cfg.maxLines, retryHint) },
+                            { role: "user",   content: userText }
+                        ]
+                    })
+                });
+        
+                if (!res.ok) throw new Error("HTTP " + res.status);
+                var data = await res.json();
+                var content = data && data.choices && data.choices[0] &&
+                              data.choices[0].message && data.choices[0].message.content;
+                var cleaned = cleanModelOutput(content);
+                if (cleaned) cleaned = applyGlossaryFixes(cleaned, text);
+                if (cleaned && !isWrongTargetLanguage(cleaned, text)) {
+                    return cleaned;
+                }
+                if (cleaned) {
+                    log("대상 언어 불일치 감지 - 한국어로 재요청: " + cleaned.slice(0, 40));
+                }
+            }
+            return null;
     
         } catch (e) {
             if (e.name === "AbortError") {
@@ -801,6 +1142,20 @@
         return `${charName}||${text}`;
     }
 
+    function shouldTranslatePlainText(text) {
+        text = String(text || "").trim();
+        if (!text) return false;
+        if (isPunctuationOnly(text)) return false;
+        return hasTranslatableLetters(text);
+    }
+
+    function cacheSpeakerForSource(source) {
+        source = String(source || "");
+        if (/^DB:/i.test(source)) return "DB";
+        if (/^Comment:/i.test(source)) return "Comment";
+        return "";
+    }
+
     function isTranslationDoneOrBusy(key) {
         return State.cacheMeta.has(key) || State.cache.has(key) || State.attempted.has(key) || State.inflight.has(key) || State.prefetching.has(key);
     }
@@ -816,7 +1171,12 @@
         State.prefetching.delete(key);
         State.attempted.add(key);
         if (translated && translated.trim && translated.trim() && translated.trim() !== String(originalText || "").trim()) {
-            var clean = translated.trim();
+            var clean = applyGlossaryFixes(translated.trim(), originalText);
+            if (isWrongTargetLanguage(clean, originalText)) {
+                log("한국어가 아닌 번역 결과 폐기: " + clean.slice(0, 40));
+                State.attempted.delete(key);
+                return false;
+            }
             State.cache.set(key, clean);
             State.cacheMeta.set(key, {
                 translated: true,
@@ -896,12 +1256,30 @@
         });
     }
 
+    function activeMessageInnerText(line) {
+        var m = String(line || "").match(/^(\s*<ActiveMessage\s*:\s*)([\s\S]*?)(\s*>\s*)$/i);
+        return m ? m[2] : "";
+    }
+
+    function replaceActiveMessageInnerText(line, translated) {
+        return String(line || "").replace(/^(\s*<ActiveMessage\s*:\s*)([\s\S]*?)(\s*>\s*)$/i, function(_, head, _body, tail) {
+            return head + translated + tail;
+        });
+    }
+
+    function translatableCommentText(line) {
+        var inner = activeMessageInnerText(line);
+        if (inner) return inner;
+        return "";
+    }
+
     function addUniqueBlock(blocks, seen, speakerName, text, source) {
         speakerName = resolveActorNameCodes(speakerName || "");
         var extracted = extractNameTagFromText(text || "");
         if (!speakerName && extracted.speakerName) speakerName = extracted.speakerName;
         text = resolveActorNameCodes(extracted.text || "");
-        if (!text || !text.trim()) return;
+        if (!shouldTranslatePlainText(text)) return;
+        speakerName = speakerName || cacheSpeakerForSource(source);
         var key = makeCacheKey(speakerName || "", text);
         if (seen.has(key)) return;
         seen.add(key);
@@ -936,6 +1314,14 @@
                 }
                 addUniqueBlock(blocks, seen, "", scrollLines.join("\n"), source);
                 i = sj;
+            } else if (Cfg.translateComments && cmd && cmd.code === 108) {
+                addUniqueBlock(blocks, seen, "Comment", translatableCommentText(String(cmd.parameters[0] || "")), "Comment:" + source);
+                var cj = i + 1;
+                while (cj < list.length && list[cj] && list[cj].code === 408) {
+                    addUniqueBlock(blocks, seen, "Comment", translatableCommentText(String(list[cj].parameters[0] || "")), "Comment:" + source);
+                    cj++;
+                }
+                i = cj;
             } else {
                 i++;
             }
@@ -1037,6 +1423,20 @@
                     blocks.push(normalizeBlock({ speakerName, text: lines.join("\n") }));
                 }
                 i = j;
+            } else if (Cfg.translateComments && list[i].code === 108) {
+                var commentText = translatableCommentText(list[i].parameters[0] || "");
+                if (shouldTranslatePlainText(commentText)) {
+                    blocks.push(normalizeBlock({ speakerName: "Comment", text: commentText, source: "Comment" }));
+                }
+                let cj = i + 1;
+                while (cj < list.length && list[cj].code === 408) {
+                    var commentMore = translatableCommentText(list[cj].parameters[0] || "");
+                    if (shouldTranslatePlainText(commentMore)) {
+                        blocks.push(normalizeBlock({ speakerName: "Comment", text: commentMore, source: "Comment" }));
+                    }
+                    cj++;
+                }
+                i = cj;
             } else {
                 i++;
             }
@@ -1187,6 +1587,7 @@
 
     function prioritizeNextMessages(interp, startIndex) {
         if (!State.enabled) return;
+        if (!interp || !interp._list) return;
 
         // 메시지창이 떠 있는 동안에는 전체/맵 JSON 번역보다 다음 대사가 우선이다.
         // 이전 우선 프리패치가 남아 있어도 현재 메시지 기준으로 다시 시작한다.
@@ -1227,31 +1628,14 @@
      */
     function scanMapBlocks(mapData) {
         var blocks = [];
+        var seen = new Set();
         if (!mapData || !mapData.events) return blocks;
 
         mapData.events.forEach(function(ev) {
             if (!ev) return;
             ev.pages.forEach(function(page) {
                 if (!page || !page.list) return;
-                var list = page.list;
-                var i = 0;
-                while (i < list.length) {
-                    if (list[i].code === 101) {
-                        var speakerName = commandSpeakerName(list[i]);
-                        var lines = [];
-                        var j = i + 1;
-                        while (j < list.length && list[j].code === 401) {
-                            lines.push(list[j].parameters[0]);
-                            j++;
-                        }
-                        if (lines.length > 0) {
-                            blocks.push(normalizeBlock({ speakerName: speakerName, text: lines.join("\n") }));
-                        }
-                        i = j;
-                    } else {
-                        i++;
-                    }
-                }
+                scanCommandListBlocks(page.list, "Map", blocks, seen);
             });
         });
         return blocks;
@@ -1355,6 +1739,7 @@
             var full = _path.normalize(_path.join(dataDir, name));
             if (full === cacheFull) return false;
             if (/^LMTranslatorCache\.json$/i.test(name)) return false;
+            if (/^LMTranslatorExample\.json$/i.test(name)) return false;
             return true;
         });
 
@@ -1471,6 +1856,14 @@
         }, delay);
     }
 
+    function startJsonPretranslateManual(delayOverride) {
+        var old = Cfg.autoJson;
+        Cfg.autoJson = true;
+        State.jsonPretranslateStarted = false;
+        startJsonPretranslate(delayOverride);
+        Cfg.autoJson = old;
+    }
+
     function startCurrentMapThenGlobalPretranslate(mapData, mapId, delayOverride) {
         if (!State.enabled || !Cfg.autoJson || !mapData) return;
 
@@ -1584,11 +1977,146 @@
         State.currentEventPretranslateRunning = false;
         State.currentMapPretranslateRunning = false;
         State.jsonPretranslateStarted = false;
-        if (State.currentInterp && State.currentEventId) {
-            startCurrentEventThenMapThenGlobalPretranslate(State.currentInterp, State.currentEventId, 0, State.currentMessageNextIndex);
-        } else {
-            startCurrentMapThenGlobalPretranslate($dataMap, mapId, 0);
+        if (Cfg.autoJson) startCurrentMapThenGlobalPretranslate($dataMap, mapId, 0);
+    }
+
+    function addDatabaseStringTask(tasks, obj, prop, source) {
+        if (!obj || obj[prop] === undefined || obj[prop] === null) return;
+        var original = String(obj[prop]);
+        if (!shouldTranslatePlainText(original)) return;
+
+        var key = makeCacheKey("DB", original);
+        if (State.cache.has(key)) {
+            obj[prop] = State.cache.get(key);
+            return;
         }
+        if (isTranslationDoneOrBusy(key)) return;
+        tasks.push({
+            obj: obj,
+            prop: prop,
+            original: original,
+            source: source || "DB"
+        });
+    }
+
+    function addDatabaseArrayTasks(tasks, arr, source) {
+        if (!Array.isArray(arr)) return;
+        for (var i = 0; i < arr.length; i++) {
+            addDatabaseStringTask(tasks, arr, i, source + "[" + i + "]");
+        }
+    }
+
+    function addDatabaseObjectStringTasks(tasks, obj, source) {
+        if (!obj || typeof obj !== "object") return;
+        Object.keys(obj).forEach(function(k) {
+            if (typeof obj[k] === "string") {
+                addDatabaseStringTask(tasks, obj, k, source + "." + k);
+            } else if (Array.isArray(obj[k])) {
+                addDatabaseArrayTasks(tasks, obj[k], source + "." + k);
+            } else if (obj[k] && typeof obj[k] === "object") {
+                addDatabaseObjectStringTasks(tasks, obj[k], source + "." + k);
+            }
+        });
+    }
+
+    function collectDatabaseTextTasks() {
+        var tasks = [];
+
+        function eachData(arr, source, fields) {
+            if (!Array.isArray(arr)) return;
+            arr.forEach(function(item) {
+                if (!item) return;
+                fields.forEach(function(field) {
+                    addDatabaseStringTask(tasks, item, field, source + "." + field);
+                });
+            });
+        }
+
+        if (typeof $dataSystem !== "undefined" && $dataSystem) {
+            addDatabaseStringTask(tasks, $dataSystem, "gameTitle", "DB:System.gameTitle");
+            addDatabaseStringTask(tasks, $dataSystem, "currencyUnit", "DB:System.currencyUnit");
+            addDatabaseArrayTasks(tasks, $dataSystem.elements, "DB:System.elements");
+            addDatabaseArrayTasks(tasks, $dataSystem.skillTypes, "DB:System.skillTypes");
+            addDatabaseArrayTasks(tasks, $dataSystem.weaponTypes, "DB:System.weaponTypes");
+            addDatabaseArrayTasks(tasks, $dataSystem.armorTypes, "DB:System.armorTypes");
+            addDatabaseArrayTasks(tasks, $dataSystem.equipTypes, "DB:System.equipTypes");
+            addDatabaseObjectStringTasks(tasks, $dataSystem.terms, "DB:System.terms");
+        }
+
+        if (typeof $dataActors !== "undefined") eachData($dataActors, "DB:Actors", ["name", "nickname", "profile"]);
+        if (typeof $dataClasses !== "undefined") eachData($dataClasses, "DB:Classes", ["name"]);
+        if (typeof $dataSkills !== "undefined") eachData($dataSkills, "DB:Skills", ["name", "description", "message1", "message2"]);
+        if (typeof $dataItems !== "undefined") eachData($dataItems, "DB:Items", ["name", "description"]);
+        if (typeof $dataWeapons !== "undefined") eachData($dataWeapons, "DB:Weapons", ["name", "description"]);
+        if (typeof $dataArmors !== "undefined") eachData($dataArmors, "DB:Armors", ["name", "description"]);
+        if (typeof $dataEnemies !== "undefined") eachData($dataEnemies, "DB:Enemies", ["name"]);
+        if (typeof $dataStates !== "undefined") eachData($dataStates, "DB:States", ["name", "message1", "message2", "message3", "message4"]);
+
+        return tasks;
+    }
+
+    async function translateDatabaseTextBackground() {
+        if (!State.enabled || !Cfg.translateDatabaseText) return;
+        var tasks = collectDatabaseTextTasks();
+        if (tasks.length === 0) {
+            info("메뉴/DB 텍스트 번역: 번역할 항목 없음");
+            return;
+        }
+
+        var grouped = {};
+        tasks.forEach(function(task) {
+            var key = makeCacheKey("DB", task.original);
+            if (!grouped[key]) grouped[key] = [];
+            grouped[key].push(task);
+        });
+        var uniqueTasks = Object.keys(grouped).map(function(key) {
+            return grouped[key][0];
+        });
+
+        info("메뉴/DB 텍스트 번역 시작: " + uniqueTasks.length + "개 (적용 위치 " + tasks.length + "개)");
+        var N = Math.max(1, Cfg.concurrency);
+        for (var i = 0; i < uniqueTasks.length; i += N) {
+            var chunk = uniqueTasks.slice(i, i + N).filter(function(task) {
+                return !isTranslationDoneOrBusy(makeCacheKey("DB", task.original));
+            });
+            if (chunk.length === 0) continue;
+            chunk.forEach(function(task) {
+                markTranslationStarted(makeCacheKey("DB", task.original));
+            });
+
+            var results = await Promise.all(chunk.map(function(task) {
+                return callAPI(task.original, "DB");
+            }));
+
+            chunk.forEach(function(task, idx) {
+                var translated = results[idx] ? results[idx].trim() : null;
+                var key = makeCacheKey("DB", task.original);
+                if (markTranslationFinished(key, translated, task.original) && State.cache.has(key)) {
+                    grouped[key].forEach(function(target) {
+                        target.obj[target.prop] = State.cache.get(key);
+                    });
+                }
+            });
+            saveCacheToFile();
+        }
+        saveCacheToFile();
+        info("메뉴/DB 텍스트 번역 완료");
+    }
+
+    function scheduleDatabaseTextTranslation() {
+        if (!State.enabled || !Cfg.translateDatabaseText || State.databaseTranslateStarted) return;
+        State.databaseTranslateStarted = true;
+        setTimeout(function() {
+            translateDatabaseTextBackground();
+        }, Cfg.databaseTranslateDelay);
+    }
+
+    if (typeof Scene_Boot !== "undefined" && Scene_Boot.prototype.start) {
+        var _Scene_Boot_start = Scene_Boot.prototype.start;
+        Scene_Boot.prototype.start = function() {
+            _Scene_Boot_start.call(this);
+            scheduleDatabaseTextTranslation();
+        };
     }
 
     //=========================================================================
@@ -1604,9 +2132,8 @@
         // 현재 활성 맵 ID 갱신 → 이전 맵 번역 루프는 API 응답 후 자동 중단
         State.activeMapId = mapId;
 
-        log("MAP" + mapId + " 로드 완료 → 현재 맵 우선 JSON 선번역 예약");
-
-        startCurrentMapThenGlobalPretranslate(mapData, mapId);
+        log("MAP" + mapId + " 로드 완료");
+        if (Cfg.autoJson) startCurrentMapThenGlobalPretranslate(mapData, mapId);
     };
 
     //=========================================================================
@@ -1870,7 +2397,90 @@
         _setupInterpreter.call(this, list, eventId);
         rememberCurrentInterpreter(this, eventId);
         State.currentMessageNextIndex = 0;
-        startCurrentEventThenMapThenGlobalPretranslate(this, eventId, 0, 0);
+        // 플레이 중 렉 방지를 위해 이벤트 setup 시 자동 선번역은 하지 않는다.
+        // 실제 메시지가 표시될 때 현재/다음 메시지만 우선 번역한다.
+    };
+
+    function commentCommandsAt(interp) {
+        if (!interp || !interp._list) return [];
+        var list = interp._list;
+        var index = interp._index || 0;
+        var result = [];
+        var cmd = list[index];
+        if (!cmd || cmd.code !== 108) return result;
+        result.push({ command: cmd, text: String(cmd.parameters[0] || "") });
+        var i = index + 1;
+        while (i < list.length && list[i] && list[i].code === 408) {
+            result.push({ command: list[i], text: String(list[i].parameters[0] || "") });
+            i++;
+        }
+        return result;
+    }
+
+    function applyTranslatedCommentLine(originalLine, translatedText) {
+        if (activeMessageInnerText(originalLine)) {
+            return replaceActiveMessageInnerText(originalLine, translatedText);
+        }
+        return translatedText;
+    }
+
+    const _cmd108 = Game_Interpreter.prototype.command108;
+    Game_Interpreter.prototype.command108 = function(params) {
+        if (!State.enabled || !Cfg.translateComments) {
+            return _cmd108.call(this, params);
+        }
+
+        var entries = commentCommandsAt(this).filter(function(entry) {
+            return shouldTranslatePlainText(translatableCommentText(entry.text));
+        });
+        if (entries.length === 0) return _cmd108.call(this, params);
+
+        var pending = this._lmtCommentTranslate;
+        var signature = entries.map(function(entry) { return entry.text; }).join("\n");
+        if (pending && pending.signature === signature) {
+            if (!pending.done) return false;
+            this._lmtCommentTranslate = null;
+            return _cmd108.call(this, params);
+        }
+
+        var missing = entries.filter(function(entry) {
+            var original = translatableCommentText(entry.text);
+            return !State.cache.has(makeCacheKey("Comment", original)) && !State.attempted.has(makeCacheKey("Comment", original));
+        });
+        if (missing.length === 0) {
+            entries.forEach(function(entry) {
+                var original = translatableCommentText(entry.text);
+                var cached = State.cache.get(makeCacheKey("Comment", original));
+                if (cached) entry.command.parameters[0] = applyTranslatedCommentLine(entry.text, cached);
+            });
+            return _cmd108.call(this, params);
+        }
+
+        var task = {
+            signature: signature,
+            done: false
+        };
+        this._lmtCommentTranslate = task;
+
+        Promise.all(missing.map(function(entry) {
+            var original = translatableCommentText(entry.text);
+            var key = makeCacheKey("Comment", original);
+            markTranslationStarted(key);
+            return callAPI(original, "Comment", null, true).then(function(result) {
+                markTranslationFinished(key, result ? result.trim() : null, original);
+            });
+        })).then(function() {
+            entries.forEach(function(entry) {
+                var original = translatableCommentText(entry.text);
+                var cached = State.cache.get(makeCacheKey("Comment", original));
+                if (cached) entry.command.parameters[0] = applyTranslatedCommentLine(entry.text, cached);
+            });
+            saveCacheToFile();
+            task.done = true;
+        }, function() {
+            task.done = true;
+        });
+        return false;
     };
 
     const _cmd101 = Game_Interpreter.prototype.command101;
@@ -1988,6 +2598,11 @@
             var count = State.cacheMeta.size || State.cache.size;
             State.cache.clear();
             State.cacheMeta.clear();
+            State.cacheDirty = false;
+            if (State.cacheFlushTimer) {
+                clearTimeout(State.cacheFlushTimer);
+                State.cacheFlushTimer = null;
+            }
             State.attempted.clear();
             State.inflight.clear();
             State.jsonPretranslateStarted = false;
@@ -2007,6 +2622,7 @@
                 var filePath = _getCacheFilePath();
                 try {
                     _fs.writeFileSync(filePath, "{}", "utf8");
+                    _fs.writeFileSync(_getWorkCacheFilePath(), "{}", "utf8");
                 } catch (e) {
                     console.warn("[" + PLUGIN_NAME + "] 캐시 파일 초기화 실패:", e.message);
                 }
@@ -2022,12 +2638,18 @@
         PluginManager.registerCommand(PLUGIN_NAME, "startJsonPretranslate", function() {
             State.jsonPretranslateStarted = false;
             State.currentMapPretranslateRunning = false;
-            startJsonPretranslate();
+            startJsonPretranslateManual(0);
         });
     }
 
-    startJsonPretranslate();
+    if (typeof window !== "undefined" && window.addEventListener) {
+        window.addEventListener("beforeunload", function() {
+            flushCacheToFile();
+        });
+    }
 
-    console.info("[" + PLUGIN_NAME + "] v3.13.7 로드 | 콘솔 로그 최소화 | JSON 선번역 " + (Cfg.autoJson ? "ON" : "OFF"));
+    if (Cfg.autoJson) startJsonPretranslate();
+
+    console.info("[" + PLUGIN_NAME + "] v3.14.7 로드 | Comment 번역 " + (Cfg.translateComments ? "ON" : "OFF") + " | 메뉴/DB 번역 " + (Cfg.translateDatabaseText ? "ON" : "OFF") + " | 자동 JSON 선번역 " + (Cfg.autoJson ? "ON" : "OFF"));
 
 })();
