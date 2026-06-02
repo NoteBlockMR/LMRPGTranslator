@@ -108,7 +108,7 @@
  * @type number
  * @min 0
  * @max 10000
- * @default 250
+ * @default 750
  * @parent grp_api
  *
  * @param prefetchLookahead
@@ -117,7 +117,7 @@
  * @type number
  * @min 0
  * @max 50
- * @default 8
+ * @default 2
  * @parent grp_api
  *
  * @param autoPretranslateJson
@@ -174,9 +174,9 @@
  *
  * @param nameGlossary
  * @text 이름/용어 고정표
- * @desc 한 줄에 원문=번역 형식으로 입력. 예: 夏美=나츠미. 이름 오역 방지에 사용됩니다.
+ * @desc 한 줄에 "원문=번역" 입력. "원문=번역|오표기1,오표기2" 형식이면 그 오표기를 올바른 표기로 보정합니다. 예: 夏美=나츠미|나테미,나쯔미
  * @type note
- * @default "夏美=나츠미\n奈津美=나츠미\nナツミ=나츠미\nNatsumi=나츠미"
+ * @default "夏美=나츠미|나테미,나쯔미,나츠메,나쓰미\n奈津美=나츠미\nナツミ=나츠미\nNatsumi=나츠미"
  * @parent grp_prompt
  *
  * @param grp_overflow
@@ -261,7 +261,7 @@
  * @text 메뉴/DB 텍스트 번역
  * @desc 메뉴 용어, 아이템, 스킬, 장비, 상태 등 데이터베이스 텍스트를 캐시 기반으로 번역합니다.
  * @type boolean
- * @default true
+ * @default false
  * @parent grp_misc
  *
  * @param databaseTranslateDelay
@@ -285,15 +285,9 @@
  * @default data/LMTranslatorCache.json
  * @parent grp_misc
  *
- * @param workCacheFile
- * @text 작업용 번역 파일 경로
- * @desc 번역 중간 결과를 모아두는 작업용 JSON 파일입니다.
- * @default data/LMTranslatorExample.json
- * @parent grp_misc
- *
  * @param cacheFlushIntervalMs
  * @text 캐시 반영 주기(ms)
- * @desc 작업용 번역 파일과 실제 캐시 파일을 디스크에 저장하는 주기입니다.
+ * @desc 번역 캐시 파일을 디스크에 저장하는 주기입니다.
  * @type number
  * @min 1000
  * @max 300000
@@ -370,9 +364,9 @@
         temperature:   numberParam(raw.temperature   !== undefined ? raw.temperature   : 0.2, 0.2, 0, 2),
         maxTokens:     numberParam(raw.maxTokens     !== undefined ? raw.maxTokens     : 512, 512, 64, 4096),
         timeoutMs:     numberParam(raw.timeoutMs     !== undefined ? raw.timeoutMs     : 15000, 15000, 1000, 60000),
-        concurrency:   numberParam(raw.concurrentLimit || 1, 1, 1, 10),
-        requestCooldownMs: numberParam(raw.requestCooldownMs !== undefined ? raw.requestCooldownMs : 250, 250, 0, 10000),
-        prefetchLookahead: numberParam(raw.prefetchLookahead || 8, 8, 0, 50),
+        concurrency:   numberParam(raw.concurrentLimit || 1, 1, 1, 5),
+        requestCooldownMs: numberParam(raw.requestCooldownMs !== undefined ? raw.requestCooldownMs : 750, 750, 0, 10000),
+        prefetchLookahead: numberParam(raw.prefetchLookahead || 2, 2, 0, 50),
         autoJson:      raw.autoPretranslateJson === "true",
         jsonDelay:     numberParam(raw.jsonPretranslateDelay !== undefined ? raw.jsonPretranslateDelay : 3000, 3000, 0, 60000),
         sourceLang:    String(raw.sourceLang    || "Japanese"),
@@ -415,16 +409,15 @@
         fallback:      raw.fallbackToOriginal   !== "false",
         preBeforeShow: raw.pretranslateBeforeDisplay !== "false",
         translateComments: raw.translateComments !== "false",
-        translateDatabaseText: raw.translateDatabaseText !== "false",
+        translateDatabaseText: raw.translateDatabaseText === "true",
         databaseTranslateDelay: numberParam(raw.databaseTranslateDelay !== undefined ? raw.databaseTranslateDelay : 1000, 1000, 0, 60000),
         debug:         raw.debugMode            === "true",
         cacheFile:     String(raw.cacheFile     || "data/LMTranslatorCache.json"),
-        workCacheFile: String(raw.workCacheFile || "data/LMTranslatorExample.json"),
         cacheFlushInterval: numberParam(raw.cacheFlushIntervalMs !== undefined ? raw.cacheFlushIntervalMs : 30000, 30000, 1000, 300000),
         autoSave:      raw.autoSaveCache        !== "false",
         nameGlossaryRaw: (function() {
             try { return JSON.parse(raw.nameGlossary || "\"\""); } catch(e) { return String(raw.nameGlossary || ""); }
-        })() || "夏美=나츠미\n奈津美=나츠미\nナツミ=나츠미\nNatsumi=나츠미",
+        })() || "夏美=나츠미|나테미,나쯔미,나츠메,나쓰미\n奈津美=나츠미\nナツミ=나츠미\nNatsumi=나츠미",
         glossary:      [],
         characters:    []
     };
@@ -442,16 +435,30 @@
     }
 
     function parseNameGlossary(rawText) {
+        // 한 줄 형식:
+        //   "원문=번역"                       기본 표기 고정
+        //   "원문=번역|오표기1,오표기2"        + 모델이 자주 내는 오표기를 올바른 표기로 보정
+        // 오표기 보정은 해당 원문이 실제로 등장한 대사에서만 적용된다.
         return String(rawText || "")
             .split(/\r?\n/)
             .map(function(line) { return line.trim(); })
             .filter(function(line) { return line && line.indexOf("=") > 0; })
             .map(function(line) {
-                var pos = line.indexOf("=");
-                return {
-                    source: line.slice(0, pos).trim(),
-                    target: line.slice(pos + 1).trim()
-                };
+                var pos    = line.indexOf("=");
+                var source = line.slice(0, pos).trim();
+                var rest   = line.slice(pos + 1).trim();
+                var target = rest;
+                var variants = [];
+
+                var bar = rest.indexOf("|");
+                if (bar >= 0) {
+                    target   = rest.slice(0, bar).trim();
+                    variants = rest.slice(bar + 1)
+                        .split(",")
+                        .map(function(v) { return v.trim(); })
+                        .filter(function(v) { return v; });
+                }
+                return { source: source, target: target, variants: variants };
             })
             .filter(function(item) { return item.source && item.target; });
     }
@@ -469,13 +476,13 @@
         currentMessageNextIndex: null,
         currentEventId: 0,
         activeMapId:   null,
-        foreground:    false,   // ← 추가: 실시간 번역 진행 중 여부
-        bgController:  null,    // ← 추가: 백그라운드 AbortController
+        foreground:    false,   // 실시간 번역 진행 중 여부(foregroundDepth>0 미러)
+        foregroundDepth: 0,
+        prefetchQueue: [],      // 출력-이벤트 기반 선번역 FIFO 큐 ({key,text,speakerName})
+        prefetchDraining: false,// 드레이너 동작 중 여부
         preDisplayFallback: new Set(),
         prefetching:    new Set(),
-        attempted:      new Set(),
         inflight:       new Set(),
-        prefetchSerial: 0,
         jsonPretranslateRunning: false,
         jsonPretranslateStarted: false,
         jsonJobToken: 0,
@@ -485,7 +492,6 @@
         apiActive: 0,
         apiQueue: [],
         apiPumpTimer: null,
-        nextPriorityRunning: false,
         cacheDirty: false,
         cacheFlushTimer: null,
         databaseTranslateStarted: false,
@@ -503,8 +509,9 @@
 
     function stripControlCodesForLanguage(text) {
         return String(text || "")
-            .replace(/\\[A-Za-z]\[\d+\]/g, "")
-            .replace(/\\[!.<>^|\\{}]/g, "")
+            .replace(/\\[A-Za-z]\[\d+\]/g, "")   // \N[3] \C[1] \I[266] \V[2]
+            .replace(/\\[A-Za-z]/g, "")          // \G \. 등 글자형 단독 제어코드
+            .replace(/\\[!.<>^|\\{}]/g, "")       // \! \. \> 등 기호형 제어코드
             .replace(/\s+/g, "");
     }
 
@@ -522,7 +529,9 @@
 
     function hasTranslatableLetters(text) {
         var plain = stripControlCodesForLanguage(text);
-        return /[\u3040-\u30FF\u31F0-\u31FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/.test(plain);
+        // \uB77C\uD2F4(\uC601\uC5B4 \uB4F1) + \uAC00\uB098 + \uD55C\uC911\uC77C \uD55C\uC790 = \uBC88\uC5ED \uB300\uC0C1 \uBB38\uC790.
+        // \uD55C\uAE00\uC740 \uC774\uBBF8 \uBC88\uC5ED\uB41C \uACB0\uACFC\uC774\uBBC0\uB85C \uB300\uC0C1\uC5D0\uC11C \uC81C\uC678(\uC7AC\uBC88\uC5ED \uBC29\uC9C0).
+        return /[A-Za-z\u3040-\u30FF\u31F0-\u31FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/.test(plain);
     }
 
     function escapeRegExp(text) {
@@ -540,15 +549,25 @@
         if (!out || isPunctuationOnly(out)) return false;
 
         // 한국어 대상인데 일본어 가나가 섞이면 거의 항상 모델이 언어를 놓친 것이다.
-        if (hasKana(out)) return true;
-
         // 중국어/일본어 한자만 있고 한글이 없으면 한국어 번역으로 보지 않는다.
         if (hasCjkIdeograph(out) && !hasHangul(out)) return true;
 
         // 원문이 번역 가능한 문자였는데 결과에 한글이 전혀 없으면 한국어 고정 실패로 간주한다.
+        if (isAllowedUntranslatedEffectAscii(output) && isAllowedUntranslatedEffectAscii(sourceText)) return false;
         if (hasTranslatableLetters(sourceText) && !hasHangul(out)) return true;
 
         return false;
+    }
+
+    // 효과음/신음처럼 원문 유지가 허용된 짧은 가나 문자열 판별
+    // (한자 없이 가나 + 기호/문장부호만으로 이루어진 24자 이하 문자열)
+    function isAllowedUntranslatedEffectAscii(text) {
+        var s = stripControlCodesForLanguage(text);
+        if (!s || !hasKana(s) || hasCjkIdeograph(s)) return false;
+        var kanaRe = new RegExp("[\\u3040-\\u30FF\\u31F0-\\u31FF\\u30FC]+", "g");
+        var markRe = new RegExp("[~\\u301C\\u2026!?\\uFF01\\uFF1F\\u2661\\u2665\\u266A\\u3002\\u3001\\u30FB,.\\\\\\-\\u2014_\\s]", "g");
+        var rest = s.replace(kanaRe, "").replace(markRe, "");
+        return rest.length === 0 && s.length <= 24;
     }
 
     function glossaryPromptSection() {
@@ -572,19 +591,37 @@
         if (!output || !Cfg.glossary || Cfg.glossary.length === 0) return output;
         var fixed = String(output);
 
+        // 1) 같은 번역 표기(target)에 묶인 오표기 목록을 미리 모은다.
+        //    한 이름에 원문이 여러 개(夏美/奈津美/ナツミ ...)라도 variants는 공유한다.
+        var variantsByTarget = {};
         Cfg.glossary.forEach(function(item) {
+            if (!item.variants || item.variants.length === 0) return;
+            var bucket = variantsByTarget[item.target] || (variantsByTarget[item.target] = []);
+            item.variants.forEach(function(v) {
+                if (v && v !== item.target && bucket.indexOf(v) < 0) bucket.push(v);
+            });
+        });
+
+        // 2) 원문에 실제로 등장한 이름만 대상으로 보정한다 (무관한 단어 오치환 방지).
+        var activeTargets = {};
+        Cfg.glossary.slice().sort(function(a, b) {
+            return String(b.source || "").length - String(a.source || "").length;
+        }).forEach(function(item) {
             if (!sourceContainsGlossaryTerm(sourceText, item)) return;
+            activeTargets[item.target] = true;
 
-            // 모델이 원문 표기를 그대로 남겼다면 지정한 한국어 표기로 교체한다.
+            // 모델이 원문 표기를 그대로 남겼다면 지정한 번역 표기로 교체한다.
             fixed = fixed.replace(new RegExp(escapeRegExp(item.source), "g"), item.target);
+        });
 
-            // 자주 나오는 나츠미 오독을 보정한다. 더 필요한 이름은 이름/용어 고정표에 추가하면 된다.
-            if (item.target === "나츠미") {
-                fixed = fixed.replace(/나테미/g, item.target);
-                fixed = fixed.replace(/나쯔미/g, item.target);
-                fixed = fixed.replace(/나츠메/g, item.target);
-                fixed = fixed.replace(/나쓰미/g, item.target);
-            }
+        // 3) 등장한 이름에 한해, 사용자가 직접 지정한 오표기만 올바른 표기로 보정한다.
+        //    (예전의 나츠미 전용 하드코딩 제거 → 이름/용어 고정표에서 제어)
+        Object.keys(activeTargets).forEach(function(target) {
+            var variants = variantsByTarget[target];
+            if (!variants) return;
+            variants.forEach(function(v) {
+                fixed = fixed.replace(new RegExp(escapeRegExp(v), "g"), target);
+            });
         });
 
         return fixed;
@@ -617,11 +654,6 @@
         return _path.join(process.cwd(), Cfg.cacheFile);
     }
 
-    function _getWorkCacheFilePath() {
-        if (!_path) return null;
-        return _path.join(process.cwd(), Cfg.workCacheFile);
-    }
-
     function _getDataDirPath() {
         if (!_path) return null;
         return _path.join(process.cwd(), "data");
@@ -644,7 +676,6 @@
     }
 
     function ensureCacheFilesExist() {
-        ensureJsonFileExists(_getWorkCacheFilePath());
         ensureJsonFileExists(_getCacheFilePath());
     }
 
@@ -652,8 +683,7 @@
     function loadCacheFromFile() {
         if (!_fs) return;
         ensureCacheFilesExist();
-        var filePath = _getWorkCacheFilePath();
-        if (!_fs.existsSync(filePath)) filePath = _getCacheFilePath();
+        var filePath = _getCacheFilePath();
         try {
             if (_fs.existsSync(filePath)) {
                 var fileRaw = _fs.readFileSync(filePath, "utf8");
@@ -680,7 +710,6 @@
                             }
                         }
                         State.cacheMeta.set(k, entry);
-                        State.attempted.add(k);
                         if (entry.translated === true && entry.text) {
                             State.cache.set(k, entry.text);
                         }
@@ -699,7 +728,6 @@
                             sourceText: oldSourceText,
                             updatedAt: oldFixedText !== entry ? Date.now() : 0
                         });
-                        State.attempted.add(k);
                     }
                     count++;
                 });
@@ -732,7 +760,6 @@
 
     function flushCacheToFile() {
         if (!State.cacheDirty) return;
-        writeCacheFileNow(_getWorkCacheFilePath());
         writeCacheFileNow(_getCacheFilePath());
         State.cacheDirty = false;
     }
@@ -987,9 +1014,41 @@
         });
     }
 
+    /**
+     * 실시간(포그라운드) 번역이 시작될 때 호출.
+     * 현재 화면에 표시될 대사가 항상 최우선이지만, 진행 중인 백그라운드
+     * 번역을 abort하지는 않는다. 포그라운드 요청은 callAPI(priority=true)로
+     * API 큐 맨 앞에 끼어들어 먼저 처리되고(쿨다운 0), 출력 선번역 드레이너의
+     * 비우선 요청은 그 뒤에서 requestCooldownMs 간격으로 채워진다.
+     *
+     * 동시에 여러 포그라운드 번역(표시 전 번역 + 창 번역)이 겹칠 수 있으므로
+     * 단일 boolean이 아니라 foregroundDepth(참조 카운트)로 관리한다.
+     * enter/leave는 반드시 짝을 이뤄야 하며, depth가 0이 될 때만
+     * 백그라운드 선번역이 재개된다.
+     *
+     * startMessage(캐시 MISS)와 command101(표시 전 번역) 양쪽에서 공유한다.
+     */
+    function enterForegroundTranslation() {
+        State.foregroundDepth++;
+        State.foreground = State.foregroundDepth > 0;
+        State.jsonPretranslateStarted = false;
+        State.jsonPretranslateRunning = false;
+        State.currentMapPretranslateRunning = false;
+    }
+
+    function leaveForegroundTranslation() {
+        State.foregroundDepth = Math.max(0, State.foregroundDepth - 1);
+        State.foreground = State.foregroundDepth > 0;
+    }
+
     function callAPI(text, charName, signal, priority) {
         return new Promise(function(resolve) {
             if (signal && signal.aborted) {
+                resolve(null);
+                return;
+            }
+            if (!priority && State.apiQueue.length > 200) {
+                console.warn("[" + PLUGIN_NAME + "] API 큐가 200개를 초과해 백그라운드 번역 요청을 보류/건너뜁니다: " + String(text || "").slice(0, 30));
                 resolve(null);
                 return;
             }
@@ -1048,9 +1107,43 @@
         return out || null;
     }
 
+    function withTimeout(promise, ms, onTimeout) {
+        return new Promise(function(resolve, reject) {
+            var done = false;
+            var timer = setTimeout(function() {
+                if (done) return;
+                done = true;
+                try {
+                    if (onTimeout) onTimeout();
+                } catch (e) {}
+                var err = new Error("Timeout");
+                err.name = "AbortError";
+                reject(err);
+            }, Math.max(1000, Number(ms) || 15000));
+
+            promise.then(function(value) {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                resolve(value);
+            }, function(error) {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                reject(error);
+            });
+        });
+    }
+
     async function callAPIRaw(text, charName, signal) {
+        if (typeof fetch !== "function") {
+            console.warn("[" + PLUGIN_NAME + "] fetch API를 사용할 수 없어 번역 요청을 건너뜁니다.");
+            return null;
+        }
+
         var timeoutController = (typeof AbortController !== "undefined") ? new AbortController() : null;
         var timeoutId = null;
+        var abortListener = null;
     
         if (timeoutController) {
             timeoutId = setTimeout(function() {
@@ -1059,9 +1152,10 @@
     
             // 외부 취소 신호(백그라운드 abort)가 오면 타임아웃 컨트롤러도 같이 abort
             if (signal) {
-                signal.addEventListener("abort", function() {
+                abortListener = function() {
                     timeoutController.abort();
-                });
+                };
+                signal.addEventListener("abort", abortListener);
             }
         }
     
@@ -1077,7 +1171,7 @@
                     ? "Translate the following " + Cfg.sourceLang + " text into Korean only. Return only Korean translation.\n\n" + text
                     : text;
 
-                var res = await fetch(Cfg.apiUrl, {
+                var fetchPromise = fetch(Cfg.apiUrl, {
                     method:  "POST",
                     headers: { "Content-Type": "application/json" },
                     signal:  timeoutController ? timeoutController.signal : undefined,
@@ -1091,9 +1185,14 @@
                         ]
                     })
                 });
+                var res = await withTimeout(fetchPromise, Cfg.timeoutMs, function() {
+                    if (timeoutController) timeoutController.abort();
+                });
         
                 if (!res.ok) throw new Error("HTTP " + res.status);
-                var data = await res.json();
+                var data = await withTimeout(res.json(), Cfg.timeoutMs, function() {
+                    if (timeoutController) timeoutController.abort();
+                });
                 var content = data && data.choices && data.choices[0] &&
                               data.choices[0].message && data.choices[0].message.content;
                 var cleaned = cleanModelOutput(content);
@@ -1120,21 +1219,60 @@
     
         } finally {
             if (timeoutId !== null) clearTimeout(timeoutId);
+            if (signal && abortListener && signal.removeEventListener) {
+                signal.removeEventListener("abort", abortListener);
+            }
         }
+    }
+
+    //=========================================================================
+    // 이름창(name box) 분리
+    // 이 게임은 메시지 맨 앞에 \n<화자> 형식 이름창을 둔다 (\n<\N[9]>, \n<Female Student> 등).
+    // 이름창은 번역하지 않고 그대로 보존하고, 본문만 번역한 뒤 표시 시 다시 붙인다.
+    // 그래야 (1) 이름이 사라지지 않고 (2) 화자/본문 기준 캐시 키가 표시·선번역 양쪽에서 일치한다.
+    //=========================================================================
+    function splitSpeakerBox(text) {
+        var m = String(text || "").match(/^(\s*\\[nN]<[^>]*>)([\s\S]*)$/);
+        if (m) return { box: m[1], body: m[2] };
+        return { box: "", body: String(text || "") };
+    }
+
+    function speakerFromBox(box) {
+        var m = String(box || "").match(/<([^>]*)>/);
+        if (!m) return "";
+        return resolveActorNameCodes(m[1]).trim();
+    }
+
+    /** 원본 메시지 텍스트 → { speaker, body, box }. 표시·스캔 양쪽에서 동일하게 사용. */
+    function parseMessageText(rawText, nativeSpeaker) {
+        var clean = stripMessageFormatTags(String(rawText || ""));
+        var sb = splitSpeakerBox(clean);
+        var speaker = resolveActorNameCodes(nativeSpeaker || "");
+        if (!speaker) speaker = speakerFromBox(sb.box);
+        return {
+            speaker: speaker,
+            body: resolveActorNameCodes(sb.body),
+            box: sb.box
+        };
+    }
+
+    /** 분할된 페이지의 첫 줄 맨 앞에 이름창 토큰을 복원 */
+    function prependSpeakerBox(pages, box) {
+        if (!box || !pages || !pages.length) return pages;
+        if (!pages[0] || pages[0].length === 0) pages[0] = [box];
+        else pages[0][0] = box + pages[0][0];
+        return pages;
     }
 
     //=========================================================================
     // $gameMessage 현재 창 정보 수집
     //=========================================================================
     function getMessageInfo() {
-        // speakerName: MZ 1.6+ API, 구버전은 빈 문자열
-        var charName = (typeof $gameMessage.speakerName === "function")
-            ? resolveActorNameCodes($gameMessage.speakerName() || "")
+        var nativeSpeaker = (typeof $gameMessage.speakerName === "function")
+            ? ($gameMessage.speakerName() || "")
             : "";
-        var extracted = extractNameTagFromText($gameMessage.allText());
-        if (!charName && extracted.speakerName) charName = extracted.speakerName;
-        const text = resolveActorNameCodes(extracted.text);
-        return { charName, text };
+        var parsed = parseMessageText($gameMessage.allText(), nativeSpeaker);
+        return { charName: parsed.speaker, text: parsed.body, box: parsed.box };
     }
 
     /** 캐시 키: "화자이름|원문텍스트" */
@@ -1157,7 +1295,7 @@
     }
 
     function isTranslationDoneOrBusy(key) {
-        return State.cacheMeta.has(key) || State.cache.has(key) || State.attempted.has(key) || State.inflight.has(key) || State.prefetching.has(key);
+        return State.cache.has(key) || State.inflight.has(key) || State.prefetching.has(key);
     }
 
     function markTranslationStarted(key) {
@@ -1169,12 +1307,10 @@
         if (!key) return;
         State.inflight.delete(key);
         State.prefetching.delete(key);
-        State.attempted.add(key);
-        if (translated && translated.trim && translated.trim() && translated.trim() !== String(originalText || "").trim()) {
+        if (translated && translated.trim && translated.trim() && (translated.trim() !== String(originalText || "").trim() || isAllowedUntranslatedEffectAscii(originalText))) {
             var clean = applyGlossaryFixes(translated.trim(), originalText);
             if (isWrongTargetLanguage(clean, originalText)) {
                 log("한국어가 아닌 번역 결과 폐기: " + clean.slice(0, 40));
-                State.attempted.delete(key);
                 return false;
             }
             State.cache.set(key, clean);
@@ -1186,12 +1322,6 @@
             });
             return true;
         }
-        State.cacheMeta.set(key, {
-            translated: false,
-            text: "",
-            sourceText: String(originalText || ""),
-            updatedAt: Date.now()
-        });
         return false;
     }
 
@@ -1220,28 +1350,26 @@
         });
     }
 
-    function extractNameTagFromText(text) {
-        text = String(text || "");
-        var speaker = "";
-        var cleaned = text.replace(/\\[Nn]\[(\d+)\]\s*/g, function(match, id) {
-            var name = actorNameById(id);
-            if (!speaker && name) speaker = name;
-            return "";
-        });
-        return {
-            speakerName: speaker,
-            text: cleaned
-        };
+    // 런타임 메시지 플러그인(MessageCore 등)이 화면 표시 시 동적으로 붙였다 떼는
+    // 포맷 태그를 정규화한다. 이게 없으면 "표시 시 텍스트(allText)"와 "정적 데이터
+    // 스캔 텍스트"가 달라져 캐시 키가 어긋나고, 선번역해둔 결과를 표시가 못 찾아
+    // 매번 재번역하게 된다. 표시·선번역 양쪽 경로가 모두 거치는 곳에서 통일한다.
+    function stripMessageFormatTags(text) {
+        return String(text || "")
+            .replace(/<\/?WordWrap(?:Off)?>/gi, "")   // 워드랩 토글 태그 → 제거
+            .replace(/<br\s*\/?>/gi, "\n");            // 줄바꿈 태그 → 개행으로 통일
     }
 
+
     function normalizeBlock(block) {
-        var speakerName = resolveActorNameCodes(block && block.speakerName ? block.speakerName : "");
-        var extracted = extractNameTagFromText(block && block.text ? block.text : "");
-        if (!speakerName && extracted.speakerName) speakerName = extracted.speakerName;
+        var parsed = parseMessageText(block && block.text ? block.text : "",
+                                      block && block.speakerName ? block.speakerName : "");
         return {
-            speakerName: speakerName,
-            text: resolveActorNameCodes(extracted.text),
-            source: block && block.source ? block.source : ""
+            speakerName: parsed.speaker,
+            text: parsed.body,
+            source: block && block.source ? block.source : "",
+            index: block && block.index !== undefined ? block.index : null,
+            nextIndex: block && block.nextIndex !== undefined ? block.nextIndex : null
         };
     }
 
@@ -1274,10 +1402,9 @@
     }
 
     function addUniqueBlock(blocks, seen, speakerName, text, source) {
-        speakerName = resolveActorNameCodes(speakerName || "");
-        var extracted = extractNameTagFromText(text || "");
-        if (!speakerName && extracted.speakerName) speakerName = extracted.speakerName;
-        text = resolveActorNameCodes(extracted.text || "");
+        var parsed = parseMessageText(text || "", speakerName || "");
+        speakerName = parsed.speaker;
+        text = parsed.body;
         if (!shouldTranslatePlainText(text)) return;
         speakerName = speakerName || cacheSpeakerForSource(source);
         var key = makeCacheKey(speakerName || "", text);
@@ -1385,13 +1512,6 @@
         }
     }
 
-    function schedulePrefetch(interp, options) {
-        if (!State.enabled || !interp || !interp._list) return;
-        setTimeout(function() {
-            prefetchNext(interp, options || {});
-        }, 0);
-    }
-
     //=========================================================================
     // 다음 메시지 블록 미리보기 (인터프리터 커맨드 리스트 스캔)
     //=========================================================================
@@ -1420,7 +1540,7 @@
                     j++;
                 }
                 if (lines.length > 0) {
-                    blocks.push(normalizeBlock({ speakerName, text: lines.join("\n") }));
+                    blocks.push(normalizeBlock({ speakerName, text: lines.join("\n"), index: i, nextIndex: j }));
                 }
                 i = j;
             } else if (Cfg.translateComments && list[i].code === 108) {
@@ -1457,163 +1577,105 @@
         });
     }
 
-    /**
-     * 현재 이후 남은 모든 메시지 블록을 백그라운드에서 병렬 번역
-     * - 이미 캐시된 항목은 건너뜀
-     * - 로딩 표시 없이 조용히 실행
-     */
-    function prefetchNext(interp, options) {
-        if (!State.enabled) return false;
-        options = options || {};
+    //=========================================================================
+    // 출력-이벤트 기반 선번역 FIFO 큐
+    //
+    // 메시지창이 출력될 때마다(prioritizeNextMessages 호출) 그 "출력 지점"
+    // 이후의 다음 대사들을 표시 순서대로 큐 뒤에 덧붙인다. 단일 드레이너가
+    // 큐를 앞에서부터 1개씩 꺼내 번역하며, 항목 간 간격은 API 큐가
+    // requestCooldownMs(기본 750ms)로 강제한다.
+    //
+    // 명령어 리스트를 시작 인덱스부터 통째로 미리 스캔/리셋하거나
+    // abort로 재시작하지 않는다. 큐는 출력될 때마다 자라고, 중복/캐시된
+    // 항목은 넣지 않으며, interp 참조 대신 (화자, 원문)만 스냅샷해 담으므로
+    // 맵/이벤트가 바뀌어도 안전하다.
+    //=========================================================================
 
-        if (options.restart !== false && State.bgController) {
-            State.bgController.abort();
-            State.bgController = null;
-            State.prefetching.clear();
-        }
-
-        const blocks = peekAllBlocks(interp, options.startIndex);
-        if (blocks.length === 0) {
-            if (options.priority) info("다음 대사 선번역: 후보 없음 (startIndex=" + options.startIndex + ")");
-            return false;
-        }
-
-        var limit = options.limit !== undefined ? Number(options.limit) : Cfg.prefetchLookahead;
-        var scope = limit > 0 ? blocks.slice(0, limit) : blocks;
-    
-        const pending = scope.map(normalizeBlock).filter(function(b) {
-            var key = makeCacheKey(b.speakerName, b.text);
-            return !isTranslationDoneOrBusy(key);
+    /** 블록 1개를 선번역 FIFO 큐에 추가 (캐시/진행 중/큐 중복은 스킵) */
+    function enqueuePrefetchBlock(block) {
+        if (!block || !block.text) return false;
+        var key = makeCacheKey(block.speakerName, block.text);
+        if (isTranslationDoneOrBusy(key)) return false;
+        if (State.prefetchQueue.some(function(b) { return b.key === key; })) return false;
+        State.prefetchQueue.push({
+            key: key,
+            text: block.text,
+            speakerName: block.speakerName
         });
-        if (pending.length === 0) {
-            var skipMsg = "다음 대사 선번역 스킵 (" + scope.length + "개 모두 캐시/진행 중)";
-            if (options.priority) info(skipMsg);
-            else log(skipMsg);
-            return false;
-        }
-    
-        var startMsg = "다음 대사 선번역 시작: " + pending.length + "개 (검사 " + scope.length + "개 / 전체 " + blocks.length + "개)";
-        if (options.priority) info(startMsg);
-        else log(startMsg);
-
-        if (State.foreground && !options.allowForeground) {
-            log("다음 대사 선번역 예약 취소: 현재 표시 대사 번역 중");
-            return false;
-        }
-
-        if (options.restart === false && State.bgController) {
-            log("다음 대사 선번역 스킵 (이미 진행 중)");
-            return false;
-        }
-
-        // 새 AbortController 등록
-        var controller = (typeof AbortController !== "undefined") ? new AbortController() : null;
-        State.bgController = controller;
-        var signal = controller ? controller.signal : null;
-        var serial = ++State.prefetchSerial;
-    
-        (async () => {
-            const N = Cfg.concurrency;
-            for (var ci = 0; ci < pending.length; ci += N) {
-                // 포그라운드 번역이 시작됐거나 외부에서 취소됐으면 즉시 중단
-                if (State.foreground && !options.allowForeground) {
-                    log("다음 대사 선번역 중단: 현재 표시 대사 번역 우선");
-                    break;
-                }
-                if (signal && signal.aborted) {
-                    log("다음 대사 선번역 취소됨");
-                    break;
-                }
-
-                // N개짜리 청크 추출 후 루프 중 캐시된 항목 재필터
-                var chunk = pending.slice(ci, ci + N).map(normalizeBlock).filter(function(b) {
-                    var key = makeCacheKey(b.speakerName, b.text);
-                    return !isTranslationDoneOrBusy(key);
-                });
-                if (chunk.length === 0) continue;
-                chunk.forEach(function(b) {
-                    var key = makeCacheKey(b.speakerName, b.text);
-                    State.prefetching.add(key);
-                    markTranslationStarted(key);
-                });
-
-                log("다음 대사 선번역: " + chunk.length + "개 (동시 한도 " + N + ")");
-
-                // N개 동시 API 호출
-                var results = await Promise.all(chunk.map(function(b) {
-                    return callAPI(b.text, b.speakerName, signal, !!options.priority);
-                }));
-
-                // API 응답 후에도 다시 체크
-                if ((State.foreground && !options.allowForeground) || (signal && signal.aborted)) {
-                    log("다음 대사 선번역 중단: 현재 표시 대사 번역 우선 (응답 후)");
-                    break;
-                }
-
-                // 결과 일괄 캐시 저장
-                chunk.forEach(function(block, idx) {
-                    var translated = results[idx] ? results[idx].trim() : null;
-                    var key = makeCacheKey(block.speakerName, block.text);
-                    if (markTranslationFinished(key, translated, block.text)) {
-                        log("다음 대사 선번역 완료 [" + (block.speakerName || "?") + "]: " + translated.slice(0, 40));
-                    } else {
-                        log("다음 대사 선번역 실패/동일 [" + (block.speakerName || "?") + "] - 재번역 방지");
-                    }
-                });
-                saveCacheToFile(); // 청크 단위로 1회 저장
-            }
-            if (State.bgController === controller && State.prefetchSerial === serial) {
-                State.bgController = null;
-            }
-            log("다음 대사 선번역 완료 (또는 중단)");
-            if (options.onComplete) options.onComplete();
-        })();
         return true;
     }
 
-    function prefetchNextThenResumeJson(interp, options) {
-        options = options || {};
-        options.onComplete = function() {
-            State.nextPriorityRunning = false;
-            resumeJsonPretranslateAfterForeground();
-        };
-
-        var started = prefetchNext(interp, options);
-        if (!started) {
-            State.nextPriorityRunning = false;
-            resumeJsonPretranslateAfterForeground();
-        }
+    /** 출력 지점(fromIndex) 이후 다음 대사들을 표시 순서대로 큐에 덧붙인다 */
+    function enqueueUpcomingFromOutput(interp, fromIndex) {
+        if (!interp || !interp._list) return 0;
+        var blocks = peekAllBlocks(interp, fromIndex);
+        if (blocks.length === 0) return 0;
+        var limit = Cfg.prefetchLookahead;
+        var scope = limit > 0 ? blocks.slice(0, limit) : blocks;
+        var added = 0;
+        scope.map(normalizeBlock).forEach(function(b) {
+            if (enqueuePrefetchBlock(b)) added++;
+        });
+        return added;
     }
 
-    function prioritizeNextMessages(interp, startIndex) {
-        if (!State.enabled) return;
-        if (!interp || !interp._list) return;
+    /** 선번역 큐 드레이너: 앞에서부터 1개씩 번역. API 큐가 750ms 간격을 강제. */
+    function startPrefetchDrain() {
+        if (State.prefetchDraining) return;
+        if (State.prefetchQueue.length === 0) return;
+        State.prefetchDraining = true;
 
-        // 메시지창이 떠 있는 동안에는 전체/맵 JSON 번역보다 다음 대사가 우선이다.
-        // 이전 우선 프리패치가 남아 있어도 현재 메시지 기준으로 다시 시작한다.
-        if (State.bgController) {
-            State.bgController.abort();
-            State.bgController = null;
-            State.prefetching.clear();
-        }
-        State.nextPriorityRunning = true;
-        State.jsonJobToken++;
+        (async () => {
+            while (State.enabled && State.prefetchQueue.length > 0) {
+                var item = State.prefetchQueue.shift();
+                if (!item || isTranslationDoneOrBusy(item.key)) continue;
+
+                State.prefetching.add(item.key);
+                markTranslationStarted(item.key);
+
+                // 비우선 요청 → pumpApiQueue가 requestCooldownMs 간격으로 1개씩 처리.
+                // 현재 표시 대사(포그라운드)는 callAPI(priority=true)로 앞에 끼어들어 먼저 나간다.
+                var result = await callAPI(item.text, item.speakerName, null, false);
+                var translated = result ? result.trim() : null;
+
+                // markTranslationFinished가 inflight/prefetching 정리까지 담당
+                if (markTranslationFinished(item.key, translated, item.text)) {
+                    log("출력 선번역 완료 [" + (item.speakerName || "?") + "]: " + translated.slice(0, 40));
+                } else {
+                    log("출력 선번역 실패/동일 [" + (item.speakerName || "?") + "]");
+                }
+                saveCacheToFile();
+            }
+            State.prefetchDraining = false;
+            // 큐가 비면(표시 대사 우선 처리가 끝나면) 맵/전체 JSON 일괄 선번역 재개
+            resumeJsonPretranslateAfterForeground();
+        })();
+    }
+
+    /**
+     * 메시지창이 출력될 때마다 호출.
+     * 출력 지점(startIndex) 이후 다음 대사들을 큐에 덧붙이고 드레이너를 깨운다.
+     * 메시지창이 떠 있는 동안에는 맵/전체 JSON 일괄 선번역보다 출력 대사 큐가
+     * 우선이므로 일괄 작업 플래그를 내려 다음 청크에서 양보하게 한다(취소 아님).
+     */
+    function prioritizeNextMessages(interp, startIndex) {
+        if (!State.enabled || !interp || !interp._list) return;
+
         State.jsonPretranslateStarted = false;
         State.jsonPretranslateRunning = false;
         State.currentMapPretranslateRunning = false;
-        if (State.jsonController) {
-            State.jsonController.abort();
-            State.jsonController = null;
-        }
-        dropAbortedApiJobs();
-        info("다음 메시지 최우선 선번역 요청 (eventId=" + State.currentEventId + ", startIndex=" + startIndex + ")");
 
-        prefetchNextThenResumeJson(interp, {
-            startIndex: startIndex,
-            allowForeground: true,
-            priority: true,
-            restart: true
-        });
+        var added = enqueueUpcomingFromOutput(interp, startIndex);
+        if (added > 0) {
+            log("출력 지점부터 선번역 큐에 " + added + "개 추가 (queue=" + State.prefetchQueue.length + ")");
+        }
+
+        if (State.prefetchQueue.length > 0) {
+            startPrefetchDrain();
+        } else {
+            // 새로 넣을 게 없으면(전부 캐시/진행 중) 백그라운드 일괄 선번역 재개
+            resumeJsonPretranslateAfterForeground();
+        }
     }
 
     //=========================================================================
@@ -2057,6 +2119,11 @@
 
     async function translateDatabaseTextBackground() {
         if (!State.enabled || !Cfg.translateDatabaseText) return;
+        if (State.foreground) {
+            State.databaseTranslateStarted = false;
+            setTimeout(scheduleDatabaseTextTranslation, Math.max(1000, Cfg.requestCooldownMs));
+            return;
+        }
         var tasks = collectDatabaseTextTasks();
         if (tasks.length === 0) {
             info("메뉴/DB 텍스트 번역: 번역할 항목 없음");
@@ -2076,6 +2143,12 @@
         info("메뉴/DB 텍스트 번역 시작: " + uniqueTasks.length + "개 (적용 위치 " + tasks.length + "개)");
         var N = Math.max(1, Cfg.concurrency);
         for (var i = 0; i < uniqueTasks.length; i += N) {
+            if (State.foreground || State.currentEventPretranslateRunning || State.currentMapPretranslateRunning || State.jsonPretranslateRunning) {
+                info("메뉴/DB 텍스트 번역 중단: 현재 대사/맵 번역 우선");
+                State.databaseTranslateStarted = false;
+                setTimeout(scheduleDatabaseTextTranslation, Math.max(1000, Cfg.requestCooldownMs));
+                return;
+            }
             var chunk = uniqueTasks.slice(i, i + N).filter(function(task) {
                 return !isTranslationDoneOrBusy(makeCacheKey("DB", task.original));
             });
@@ -2163,6 +2236,7 @@
         this._lmtCharName      = "";
         this._lmtFaceInfo      = null;
         this._lmtSpeaker       = "";
+        this._lmtSpeakerBox    = "";  // ← 이름창 토큰 보관
         this._lmtBackground    = 0;
         this._lmtPosition      = 2;
         this._lmtPendingLines  = [];  // ← 번역 결과 임시 보관 (창 닫히는 동안 유지)
@@ -2203,7 +2277,7 @@
         if (this._lmtState === MsgState.WAIT_API) return;
 
         // ── IDLE: 새 메시지 시작 ───────────────────────────
-        const { charName, text } = getMessageInfo();
+        const { charName, text, box } = getMessageInfo();
 
         // 빈 메시지는 그냥 통과
         if (!text.trim()) {
@@ -2224,13 +2298,13 @@
         // ── 캐시 HIT: 번역문 즉시 적용 ────────────────────
         if (State.cache.has(key)) {
             log(`캐시 HIT: "${charName}" | "${text.slice(0, 25)}..."`);
-            this._applyTranslation(State.cache.get(key), charName);
+            this._applyTranslation(State.cache.get(key), charName, box);
             _startMessage.call(this);
             prioritizeNextMessages(State.currentInterp, State.currentMessageNextIndex);
             return;
         }
 
-        if (State.attempted.has(key) || State.inflight.has(key)) {
+        if (State.inflight.has(key)) {
             log("이미 번역 시도/진행 중 - 원문 표시: " + text.slice(0, 30));
             _startMessage.call(this);
             prioritizeNextMessages(State.currentInterp, State.currentMessageNextIndex);
@@ -2244,6 +2318,7 @@
         this._lmtOriginalText = text;
         this._lmtCharName     = charName;
         this._lmtSpeaker      = charName;
+        this._lmtSpeakerBox   = box;   // 이름창 토큰: 번역문 표시 시 맨 앞에 복원
         this._lmtBackground   = $gameMessage.background();
         this._lmtPosition     = $gameMessage.positionType();
         this._lmtFaceInfo     = {
@@ -2254,35 +2329,10 @@
         this._lmtState = MsgState.WAIT_API;
 
         // 현재 실제 표시될 메시지가 최우선이다. JSON 선번역은 현재 청크까지만 끝내고 멈춘다.
-        State.foreground = true;
-        State.jsonJobToken++;
-        State.jsonPretranslateStarted = false;
-        State.jsonPretranslateRunning = false;
-        State.currentMapPretranslateRunning = false;
-        if (State.jsonController) {
-            State.jsonController.abort();
-            State.jsonController = null;
-        }
-        dropAbortedApiJobs();
-        if (State.bgController) {
-            State.bgController.abort();
-            State.bgController = null;
-            State.prefetching.clear();
-        }
+        enterForegroundTranslation();
 
-
-
-        // 로딩 텍스트 표시
-        // showLoading=false여도 _startMessage를 반드시 호출해야
-        // Window_Message.update()의 while 루프가 무한반복(프리징)하지 않음
-        $gameMessage.clear();
-        this._restoreMessageMeta();
-        if (Cfg.showLoading) {
-            $gameMessage.add(Cfg.loadingText);
-        } else {
-            // 빈 창을 띄워 while 루프를 빠져나오게 함 (화면에는 안 보임)
-            $gameMessage.add("");
-        }
+        // 로딩 텍스트 표시 (프리징 방지 규칙은 _lmtShowLoadingWindow 안에 일원화)
+        this._lmtShowLoadingWindow();
         _startMessage.call(this);
 
         // 비동기 번역
@@ -2304,6 +2354,8 @@
             // 얼굴 그래픽 유무에 따라 텍스트 너비 자동 조정
             var hasFace = !!(self._lmtFaceInfo && self._lmtFaceInfo.name);
             var pages = splitIntoPages(translated, Cfg.maxLines, hasFace);
+            // 이름창 토큰을 첫 줄 맨 앞에 복원 (번역/실패-원문 모두 동일하게 이름 표시)
+            prependSpeakerBox(pages, self._lmtSpeakerBox);
 
             // 첫 페이지를 현재 창에 표시 (SHOW_RESULT 분기에서 꺼내 씀)
             self._lmtPendingLines = pages[0];
@@ -2312,7 +2364,7 @@
             self._lmtExtraPages  = pages.slice(1);
             self._lmtState = MsgState.SHOW_RESULT;
 
-            State.foreground = false;
+            leaveForegroundTranslation();
             // 현재 문장 다음에는 바로 다음 메시지들을 먼저 선번역하고, 그 뒤 현재 맵/전체 JSON으로 돌아간다.
             prioritizeNextMessages(State.currentInterp, State.currentMessageNextIndex);
 
@@ -2323,6 +2375,22 @@
                 self.startMessage();
             }
         });
+    };
+
+    /**
+     * 로딩(번역 중) 창을 띄운다.
+     *
+     * [중요] showLoading 설정과 무관하게 반드시 $gameMessage.add()를 1회 호출해야 한다.
+     * add가 한 번도 호출되지 않으면 $gameMessage가 빈 상태로 남아
+     * Window_Message.update()의 메시지 처리 while 루프가 빠져나오지 못하고
+     * 게임이 프리징된다. 표시를 끄는 경우엔 빈 문자열을 넣어 화면에만 안 보이게 한다.
+     *
+     * 이 규칙을 한 곳에 모아 두어, 이후 수정에서 add 호출이 실수로 빠지지 않도록 한다.
+     */
+    Window_Message.prototype._lmtShowLoadingWindow = function() {
+        $gameMessage.clear();
+        this._restoreMessageMeta();
+        $gameMessage.add(Cfg.showLoading ? Cfg.loadingText : "");
     };
 
     /** $gameMessage 메타 정보(얼굴/위치/배경/화자) 복원 */
@@ -2338,7 +2406,7 @@
     };
 
     /** 번역문을 $gameMessage에 직접 적용 (캐시 HIT용) */
-    Window_Message.prototype._applyTranslation = function(translatedText, charName) {
+    Window_Message.prototype._applyTranslation = function(translatedText, charName, box) {
         const faceN  = $gameMessage.faceName();
         const faceI  = $gameMessage.faceIndex();
         const bg     = $gameMessage.background();
@@ -2347,6 +2415,8 @@
         // splitIntoPages로 분할 - 얼굴 유무에 따라 텍스트 너비 자동 조정
         var hasFace = !!(faceN && faceN.length > 0);
         var pages = splitIntoPages(translatedText, Cfg.maxLines, hasFace);
+        // 이름창 토큰을 첫 줄 맨 앞에 복원
+        prependSpeakerBox(pages, box);
 
         $gameMessage.clear();
         $gameMessage.setFaceImage(faceN, faceI);
@@ -2397,8 +2467,6 @@
         _setupInterpreter.call(this, list, eventId);
         rememberCurrentInterpreter(this, eventId);
         State.currentMessageNextIndex = 0;
-        // 플레이 중 렉 방지를 위해 이벤트 setup 시 자동 선번역은 하지 않는다.
-        // 실제 메시지가 표시될 때 현재/다음 메시지만 우선 번역한다.
     };
 
     function commentCommandsAt(interp) {
@@ -2445,7 +2513,7 @@
 
         var missing = entries.filter(function(entry) {
             var original = translatableCommentText(entry.text);
-            return !State.cache.has(makeCacheKey("Comment", original)) && !State.attempted.has(makeCacheKey("Comment", original));
+            return !State.cache.has(makeCacheKey("Comment", original)) && !State.inflight.has(makeCacheKey("Comment", original));
         });
         if (missing.length === 0) {
             entries.forEach(function(entry) {
@@ -2486,27 +2554,29 @@
     const _cmd101 = Game_Interpreter.prototype.command101;
     Game_Interpreter.prototype.command101 = function(params) {
         if ($gameMessage.isBusy()) return false;
-        // 현재 인터프리터 참조 저장 → 다음 메시지 미리보기에 사용
+        // 현재 인터프리터 참조 저장 → 출력 지점 기준 선번역 큐에 사용
         rememberCurrentInterpreter(this);
 
+        // 표시 전 번역 여부와 무관하게 현재 출력 지점(다음 인덱스)을 항상 갱신해,
+        // 출력-이벤트 기반 선번역 큐가 올바른 위치(출력 지점)부터 채워지도록 한다.
+        var block = readMessageBlockFromInterpreter(this);
+        if (block && block.text.trim()) {
+            State.currentMessageNextIndex = block.nextIndex;
+        }
+
         if (State.enabled && Cfg.preBeforeShow) {
-            var block = readMessageBlockFromInterpreter(this);
             if (block && block.text.trim()) {
-                State.currentMessageNextIndex = block.nextIndex;
                 var key = makeCacheKey(block.speakerName, block.text);
 
                 if (State.cache.has(key)) {
-                    prioritizeNextMessages(this, block.nextIndex);
+                    var cachedResult = _cmd101.call(this, params);
+                    if (cachedResult !== false) prioritizeNextMessages(this, block.nextIndex);
+                    return cachedResult;
                 }
 
                 if (!State.cache.has(key) && State.prefetching.has(key)) {
                     log("표시 전 번역 대기: 선번역 진행 중 [" + (block.speakerName || "?") + "]");
                     return false;
-                }
-
-                if (!State.cache.has(key) && State.attempted.has(key)) {
-                    log("표시 전 번역 스킵: 이미 시도한 메시지 [" + (block.speakerName || "?") + "]");
-                    return _cmd101.call(this, params);
                 }
 
                 if (!State.cache.has(key)) {
@@ -2528,24 +2598,12 @@
                         };
                         this._lmtPretranslate = task;
 
-                        State.foreground = true;
-                        State.jsonJobToken++;
-                        State.jsonPretranslateStarted = false;
-                        State.jsonPretranslateRunning = false;
-                        State.currentMapPretranslateRunning = false;
-                        if (State.jsonController) {
-                            State.jsonController.abort();
-                            State.jsonController = null;
-                        }
-                        dropAbortedApiJobs();
-                        if (State.bgController) {
-                            State.bgController.abort();
-                            State.bgController = null;
-                            State.prefetching.clear();
-                        }
+                        enterForegroundTranslation();
 
                         markTranslationStarted(key);
-                        callAPI(block.text, block.speakerName, null, true).then(function(result) {
+                        var currentTranslatePromise = callAPI(block.text, block.speakerName, null, true);
+
+                        currentTranslatePromise.then(function(result) {
                             var translated = result ? result.trim() : null;
 
                             if (markTranslationFinished(key, translated, block.text)) {
@@ -2556,15 +2614,13 @@
                                 log("표시 전 번역 실패 또는 원문과 동일 - 재번역 방지, 이번 메시지는 원문 표시");
                             }
                             task.done = true;
-                            State.foreground = false;
-                            prioritizeNextMessages(State.currentInterp, block.nextIndex);
+                            leaveForegroundTranslation();
                         }, function(e) {
                             markTranslationFinished(key, null, block.text);
                             State.preDisplayFallback.add(key);
                             console.warn("[" + PLUGIN_NAME + "] 표시 전 번역 실패 (" + e.message + ")");
                             task.done = true;
-                            State.foreground = false;
-                            prioritizeNextMessages(State.currentInterp, block.nextIndex);
+                            leaveForegroundTranslation();
                         });
 
                         return false;
@@ -2573,7 +2629,11 @@
             }
         }
 
-        return _cmd101.call(this, params);
+        var result = _cmd101.call(this, params);
+        if (result !== false && State.enabled && block && block.text && block.text.trim()) {
+            prioritizeNextMessages(this, block.nextIndex);
+        }
+        return result;
     };
 
     // 메시지 창이 번역 대기 중일 때 isTerminated 를 false로 유지
@@ -2586,60 +2646,91 @@
     };
 
     //=========================================================================
-    // 플러그인 커맨드 (MZ 전용 - MV에서는 무시)
+    // 플러그인 커맨드
+    // - MZ: PluginManager.registerCommand
+    // - MV: Game_Interpreter.prototype.pluginCommand 폴백
+    // 핸들러 본체는 named 함수로 두어 MZ/MV가 동일 로직을 공유한다.
     //=========================================================================
+    function cmdToggleTranslation() {
+        State.enabled = !State.enabled;
+        info("번역 " + (State.enabled ? "ON" : "OFF"));
+    }
+
+    function cmdSetEnabled(enabled) {
+        State.enabled = !!enabled;
+        info("번역 " + (State.enabled ? "ON" : "OFF"));
+    }
+
+    function cmdClearCache() {
+        var count = State.cacheMeta.size || State.cache.size;
+        State.cache.clear();
+        State.cacheMeta.clear();
+        State.cacheDirty = false;
+        if (State.cacheFlushTimer) {
+            clearTimeout(State.cacheFlushTimer);
+            State.cacheFlushTimer = null;
+        }
+        State.inflight.clear();
+        State.prefetching.clear();
+        State.jsonPretranslateStarted = false;
+        State.jsonJobToken++;
+        State.currentMapPretranslateRunning = false;
+        State.jsonPretranslateRunning = false;
+        State.currentEventPretranslateRunning = false;
+        State.currentEventId = 0;
+        State.currentMessageNextIndex = null;
+        State.foreground = false;
+        State.foregroundDepth = 0;
+        State.prefetchQueue = [];
+        State.prefetchDraining = false;
+        if (State.jsonController) {
+            State.jsonController.abort();
+            State.jsonController = null;
+        }
+        dropAbortedApiJobs();
+        // JSON 파일도 초기화
+        if (_fs) {
+            var filePath = _getCacheFilePath();
+            try {
+                _fs.writeFileSync(filePath, "{}", "utf8");
+            } catch (e) {
+                console.warn("[" + PLUGIN_NAME + "] 캐시 파일 초기화 실패:", e.message);
+            }
+        }
+        console.info("[" + PLUGIN_NAME + "] 캐시 " + count + "개 삭제 (파일 포함)");
+    }
+
+    function cmdStartJsonPretranslate() {
+        State.jsonPretranslateStarted = false;
+        State.currentMapPretranslateRunning = false;
+        startJsonPretranslateManual(0);
+    }
+
     if (typeof PluginManager.registerCommand === "function") {
-        PluginManager.registerCommand(PLUGIN_NAME, "toggleTranslation", function() {
-            State.enabled = !State.enabled;
-            info("번역 " + (State.enabled ? "ON" : "OFF"));
-        });
-
-        PluginManager.registerCommand(PLUGIN_NAME, "clearCache", function() {
-            var count = State.cacheMeta.size || State.cache.size;
-            State.cache.clear();
-            State.cacheMeta.clear();
-            State.cacheDirty = false;
-            if (State.cacheFlushTimer) {
-                clearTimeout(State.cacheFlushTimer);
-                State.cacheFlushTimer = null;
-            }
-            State.attempted.clear();
-            State.inflight.clear();
-            State.jsonPretranslateStarted = false;
-            State.jsonJobToken++;
-            State.currentMapPretranslateRunning = false;
-            State.jsonPretranslateRunning = false;
-            State.currentEventPretranslateRunning = false;
-            State.currentEventId = 0;
-            State.currentMessageNextIndex = null;
-            if (State.jsonController) {
-                State.jsonController.abort();
-                State.jsonController = null;
-            }
-            dropAbortedApiJobs();
-            // JSON 파일도 초기화
-            if (_fs) {
-                var filePath = _getCacheFilePath();
-                try {
-                    _fs.writeFileSync(filePath, "{}", "utf8");
-                    _fs.writeFileSync(_getWorkCacheFilePath(), "{}", "utf8");
-                } catch (e) {
-                    console.warn("[" + PLUGIN_NAME + "] 캐시 파일 초기화 실패:", e.message);
-                }
-            }
-            console.info("[" + PLUGIN_NAME + "] 캐시 " + count + "개 삭제 (파일 포함)");
-        });
-
+        // ── MZ ───────────────────────────────────────────────
+        PluginManager.registerCommand(PLUGIN_NAME, "toggleTranslation", cmdToggleTranslation);
+        PluginManager.registerCommand(PLUGIN_NAME, "clearCache", cmdClearCache);
         PluginManager.registerCommand(PLUGIN_NAME, "setEnabled", function(args) {
-            State.enabled = args.enabled === "true" || args.enabled === true;
-            info("번역 " + (State.enabled ? "ON" : "OFF"));
+            cmdSetEnabled(args.enabled === "true" || args.enabled === true);
         });
-
-        PluginManager.registerCommand(PLUGIN_NAME, "startJsonPretranslate", function() {
-            State.jsonPretranslateStarted = false;
-            State.currentMapPretranslateRunning = false;
-            startJsonPretranslateManual(0);
-        });
+        PluginManager.registerCommand(PLUGIN_NAME, "startJsonPretranslate", cmdStartJsonPretranslate);
+    } else if (typeof Game_Interpreter !== "undefined") {
+        // ── MV 폴백: "LMTranslator <서브커맨드> [인자]" ─────────
+        var _lmtPluginCommand = Game_Interpreter.prototype.pluginCommand;
+        Game_Interpreter.prototype.pluginCommand = function(command, args) {
+            _lmtPluginCommand.call(this, command, args);
+            if (String(command) !== PLUGIN_NAME) return;
+            var sub = String((args && args[0]) || "").toLowerCase();
+            if (sub === "toggletranslation") {
+                cmdToggleTranslation();
+            } else if (sub === "clearcache") {
+                cmdClearCache();
+            } else if (sub === "setenabled") {
+                cmdSetEnabled(String((args && args[1]) || "").toLowerCase() === "true");
+            } else if (sub === "startjsonpretranslate") {
+                cmdStartJsonPretranslate();
+            }
+        };
     }
 
     if (typeof window !== "undefined" && window.addEventListener) {
