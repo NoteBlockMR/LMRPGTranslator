@@ -5,7 +5,8 @@ RPG MZ 번역 플러그인
 
 2. MV MZ 기반으로만 만들어진 플러그인입니다 MV MZ 는 엔진이 구버전이여도 작동합니다
 
-진짜로 잘썻다면 디스코드 user_352d 여기로 친추줘서 커피값이라도 주렴....열심히 만들려고 노력했다
+* 💖 [Patreon에서 후원하기](https://www.patreon.com/c/AINote/membership)
+* 🌟 [AINote 멤버십 가입](https://www.patreon.com/c/AINote/membership)
 
 ## 🚀 Update Log (패치 노트)
 
